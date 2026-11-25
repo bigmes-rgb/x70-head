@@ -1,2 +1,6 @@
 { "name": "X70 joystick box", "version": "BUILD_NUMBER", "new_install_prompt_erase": true,
-  "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "x70_joystick.merged.bin", "offset": 0 } ] } ] }
+  "builds": [ { "chipFamily": "ESP32", "parts": [
+    { "path": "joy_bootloader.bin", "offset": 4096 },
+    { "path": "joy_partitions.bin", "offset": 32768 },
+    { "path": "boot_app0.bin", "offset": 57344 },
+    { "path": "x70_joystick.bin", "offset": 65536 } ] } ] }

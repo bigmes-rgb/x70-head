@@ -45,8 +45,16 @@ jobs:
           cp out/head/x70_head.ino.bin dist/x70_head.bin
           cp out/joy/x70_joystick.ino.bin dist/x70_joystick.bin
           echo "${{ github.run_number }}" > dist/version.txt
-          cp out/head/x70_head.ino.merged.bin site/x70_head.merged.bin
-          cp out/joy/x70_joystick.ino.merged.bin site/x70_joystick.merged.bin
+          # installer page: the four separate parts, each at its own address (more reliable than one padded 4 MB image)
+          BOOTAPP=$(find ~/.arduino15/packages/esp32/hardware/esp32 -name boot_app0.bin | head -1)
+          cp "$BOOTAPP" site/boot_app0.bin
+          cp out/head/x70_head.ino.bootloader.bin site/head_bootloader.bin
+          cp out/head/x70_head.ino.partitions.bin site/head_partitions.bin
+          cp out/head/x70_head.ino.bin site/x70_head.bin
+          cp out/joy/x70_joystick.ino.bootloader.bin site/joy_bootloader.bin
+          cp out/joy/x70_joystick.ino.partitions.bin site/joy_partitions.bin
+          cp out/joy/x70_joystick.ino.bin site/x70_joystick.bin
+          ls -la site
           sed -i "s/BUILD_NUMBER/${{ github.run_number }}/g" site/index.html site/manifest_head.json site/manifest_joystick.json
       - name: Publish release
         env:

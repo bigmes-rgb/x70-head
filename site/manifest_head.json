@@ -1,2 +1,6 @@
 { "name": "X70 head", "version": "BUILD_NUMBER", "new_install_prompt_erase": true,
-  "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "x70_head.merged.bin", "offset": 0 } ] } ] }
+  "builds": [ { "chipFamily": "ESP32", "parts": [
+    { "path": "head_bootloader.bin", "offset": 4096 },
+    { "path": "head_partitions.bin", "offset": 32768 },
+    { "path": "boot_app0.bin", "offset": 57344 },
+    { "path": "x70_head.bin", "offset": 65536 } ] } ] }
