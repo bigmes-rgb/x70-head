@@ -1,0 +1,19 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>X70 head installer</title>
+<style>body{font:16px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:auto;padding:20px;color:#1c1f24}
+h1{font-size:22px}h2{font-size:17px;margin-top:28px}.card{border:1px solid #d5d9df;border-radius:12px;padding:16px;margin:14px 0}
+ol{padding-left:20px}small{color:#5c6570}a{color:#0b62c4}</style>
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script></head><body>
+<h1>X70 head: install and update</h1>
+<p>Build BUILD_NUMBER. Use this page for the first install over USB. After that, update from the head's own page with the <b>Update both now</b> button.</p>
+<h2>First install (USB)</h2>
+<ol><li>Use Chrome or Edge on a computer (not a phone).</li><li>Plug the board in with a USB cable.</li><li>Click the button for that board and pick its port.</li></ol>
+<div class="card"><b>Head</b> (ESP32 in the box on the tripod head)<br><br><esp-web-install-button manifest="manifest_head.json"></esp-web-install-button></div>
+<div class="card"><b>Joystick box</b> (ESP32 in the Vidpro controller)<br><br><esp-web-install-button manifest="manifest_joystick.json"></esp-web-install-button></div>
+<small>Installing over USB erases the board's saved Wi-Fi, limits and presets. Updating from the head's page keeps them.</small>
+<h2>After installing</h2>
+<ol><li>Each board makes its own Wi-Fi: <b>X70-Head</b> and <b>X70-Joystick</b>, password <b>x70head123</b>.</li>
+<li>Join it, open <b>http://192.168.4.1</b> (for the head: <b>http://192.168.4.1/wifi</b>) and enter your Wi-Fi.</li>
+<li>Head page afterwards: <b>http://x70head.local</b></li></ol>
+<h2>Code</h2><p><a href="https://github.com/bigmes-rgb/x70-head">github.com/bigmes-rgb/x70-head</a>: edit a file there and a new build appears here a few minutes later.</p>
+</body></html>

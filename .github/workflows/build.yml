@@ -1,0 +1,74 @@
+name: Build firmware
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+concurrency:
+  group: build
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Cache Arduino cores and libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino/libraries
+          key: arduino-esp32-v1
+      - name: Install ESP32 core and libraries
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          arduino-cli lib install TMCStepper FastAccelStepper
+          arduino-cli core list
+          arduino-cli lib list
+      - name: Stamp build number
+        run: |
+          sed -i "s/^#define FW_BUILD 0 /#define FW_BUILD ${{ github.run_number }} /" x70_head/x70_head.ino x70_joystick/x70_joystick.ino
+          grep -n "define FW_BUILD" x70_head/x70_head.ino x70_joystick/x70_joystick.ino
+      - name: Compile head
+        run: arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs --warnings default --output-dir out/head x70_head
+      - name: Compile joystick box
+        run: arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs --warnings default --output-dir out/joy x70_joystick
+      - name: Collect files
+        run: |
+          mkdir -p dist
+          ls -la out/head out/joy
+          cp out/head/x70_head.ino.bin dist/x70_head.bin
+          cp out/joy/x70_joystick.ino.bin dist/x70_joystick.bin
+          echo "${{ github.run_number }}" > dist/version.txt
+          cp out/head/x70_head.ino.merged.bin site/x70_head.merged.bin
+          cp out/joy/x70_joystick.ino.merged.bin site/x70_joystick.merged.bin
+          sed -i "s/BUILD_NUMBER/${{ github.run_number }}/g" site/index.html site/manifest_head.json site/manifest_joystick.json
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "build-${{ github.run_number }}" dist/x70_head.bin dist/x70_joystick.bin dist/version.txt --title "Build ${{ github.run_number }}" --notes "Automatic build of commit ${{ github.sha }}" --latest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            dist
+            site
+      - name: Upload installer page
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+  pages:
+    needs: build
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,2 @@
+{ "name": "X70 head", "version": "BUILD_NUMBER", "new_install_prompt_erase": true,
+  "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "x70_head.merged.bin", "offset": 0 } ] } ] }

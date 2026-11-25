@@ -1,0 +1,701 @@
+/*
+  Head rig - motor test (tilt first; m switches to pan)
+  ESP32 DevKit (30-pin) + 2x BTT TMC2209 V1.3, wired per soldering map v3.
+
+  BEFORE YOU START
+  - Only plug in the motor you are testing.
+  - Power ON: 12 V first, then USB.  Power OFF: USB first, then 12 V.
+  - Never plug or unplug a motor while the 12 V is on.
+
+  ARDUINO IDE
+  - Board: "ESP32 Dev Module" (Boards Manager: "esp32 by Espressif Systems")
+  - Library: "TMCStepper" by teemuatlut (Library Manager)
+  - Serial Monitor: 115200 baud
+
+  COMMANDS (type a letter, press Enter)
+    e  motor ON  (it holds still and feels stiff)
+    x  motor OFF (free to turn by hand)  - also stops a move part-way
+    f  move 1/8 turn forward, slowly        b  move 1/8 turn back, slowly
+    r  one full turn forward, then back
+    w  one full step forward, very slowly (watch the shaft)
+    +  current up 100 mA     -  current down 100 mA
+    c  switch between quiet mode (StealthChop) and SpreadCycle
+    m  switch between the TILT driver and the PAN driver
+    p  pin check: ask the driver what it sees on its EN, STEP and DIR pins
+    s  status (temperature and short-circuit flags)
+    d  look for the drivers again and test the settings line
+    t  FULL SELF-TEST: checks every signal connection it can reach, then moves each motor 1/8 turn
+*/
+
+#include <TMCStepper.h>
+
+// ---- pins (soldering map v3) ----
+const int EN_PIN    = 27;  // D27 -> both drivers' EN. HIGH = motors off (the 10k holds it HIGH at start-up)
+const int TILT_STEP = 32;  // D32 -> TILT STEP (wire 10)
+const int TILT_DIR  = 33;  // D33 -> TILT DIR  (wire 11)
+const int PAN_STEP  = 25;  // D25 -> PAN STEP  (wire 8)
+const int PAN_DIR   = 26;  // D26 -> PAN DIR   (wire 9)
+const int UART_RX   = 16;  // RX2 -> both drivers' RX pin (settings line)
+const int UART_TX   = 17;  // TX2 -> 1k -> RX2
+
+// ---- drivers ----
+const float    R_SENSE   = 0.11f;  // sense resistors on the BTT TMC2209 V1.3
+const uint8_t  TILT_ADDR = 1;      // tilt: MS1 = 3.3 V, MS2 = GND
+const uint8_t  PAN_ADDR  = 0;      // pan:  MS1 = GND,   MS2 = GND
+const uint8_t  TMC2209_VERSION = 0x21;
+
+// ---- motion ----
+const uint16_t MICROSTEPS     = 16;
+const uint32_t STEPS_PER_TURN = 200UL * MICROSTEPS;   // 1.8-degree motor
+const uint32_t STEP_RATE      = 400;                  // microsteps per second = 1/8 turn per second
+const uint16_t START_MA = 400, MIN_MA = 200, MAX_MA = 1000;
+
+TMC2209Stepper tilt(&Serial2, R_SENSE, TILT_ADDR);
+TMC2209Stepper pan (&Serial2, R_SENSE, PAN_ADDR);
+
+// the driver being tested right now
+struct Channel { const char *name; TMC2209Stepper *drv; int stepPin, dirPin; const char *stepWire, *dirWire; };
+const Channel TILT_CH = {"TILT", &tilt, TILT_STEP, TILT_DIR, "D32, wire 10", "D33, wire 11"};
+const Channel PAN_CH  = {"PAN",  &pan,  PAN_STEP,  PAN_DIR,  "D25, wire 8",  "D26, wire 9"};
+Channel ch = TILT_CH;
+
+uint16_t runCurrent = START_MA;
+bool tiltFound = false, panFound = false;
+bool motorOn = false;
+bool spread  = false;
+
+bool chFound() { return ch.drv == &tilt ? tiltFound : panFound; }
+
+void motorsOff() {
+  digitalWrite(EN_PIN, HIGH);
+  motorOn = false;
+  Serial.println(F("Motor OFF - free to turn by hand."));
+}
+
+void motorsOn() {
+  if (!chFound()) { Serial.printf("%s driver not found - motor stays off.\n", ch.name); return; }
+  digitalWrite(EN_PIN, LOW);
+  motorOn = true;
+  Serial.printf("%s motor ON - it should hold still and feel stiff. A faint hiss is normal.\n", ch.name);
+}
+
+void printHelp() {
+  Serial.println(F("Commands: e on, x off, f / b 1/8 turn, r turn and back, w one step, + / - current,"));
+  Serial.println(F("          c mode, m tilt/pan, p pin check, s status, d look again,"));
+  Serial.println(F("          t FULL SELF-TEST, h coil test (powers one coil at a time),"));
+  Serial.println(F("          j JOYSTICK / speed test, k gear check, g gear ratio (e.g. g36)"));
+}
+
+void printStatus() {
+  if (!chFound()) { Serial.printf("%s driver not found.\n", ch.name); return; }
+  uint32_t ds = ch.drv->DRV_STATUS();
+  bool shorted = ds & 0x3CUL;                            // s2ga, s2gb, s2vsa, s2vsb
+  Serial.printf("%s | motor %s | %s | current set %u mA | %u microsteps\n", ch.name, motorOn ? "ON" : "OFF",
+                spread ? "SpreadCycle" : "quiet mode", runCurrent, ch.drv->microsteps());
+  Serial.printf("Too hot: %s | getting warm: %s | short circuit: %s | driver error: %s\n",
+                (ds & 2) ? "YES - switch off" : "no", (ds & 1) ? "yes" : "no",
+                shorted ? "YES - switch off and check the motor wiring" : "no", ch.drv->drv_err() ? "YES" : "no");
+}
+
+void setCurrent(int mA) {
+  if (mA < MIN_MA) mA = MIN_MA;
+  if (mA > MAX_MA) mA = MAX_MA;
+  runCurrent = mA;
+  ch.drv->rms_current(runCurrent, 0.5);   // hold at half current when standing still
+  Serial.printf("Current now %u mA\n", runCurrent);
+}
+
+void configure(TMC2209Stepper &d) {
+  d.begin();                  // settings line on; microsteps come from the driver, not the MS pins
+  d.I_scale_analog(false);    // current is set here - the adjuster screw is ignored
+  d.toff(4);                  // output stage on (EN still decides)
+  d.blank_time(24);
+  d.microsteps(MICROSTEPS);
+  d.en_spreadCycle(spread);
+  d.pwm_autoscale(true);
+  d.TPOWERDOWN(20);
+  d.rms_current(runCurrent, 0.5);
+  d.GSTAT(0b111);             // clear the power-on flags; from here on a set flag means a restart during the test
+}
+
+// The 1k joins TX2 to RX2, so the ESP32 always hears what it sends, with or without drivers.
+bool echoTest() {
+  while (Serial2.available()) Serial2.read();
+  const uint8_t probe[4] = {0xA5, 0x5A, 0xC3, 0x3C};      // no 0x05 sync byte, so the drivers ignore it
+  Serial2.write(probe, 4);
+  Serial2.flush();
+  uint8_t got[4]; int n = 0;
+  unsigned long t0 = millis();
+  while (n < 4 && millis() - t0 < 50) { if (Serial2.available()) got[n++] = Serial2.read(); }
+  return n == 4 && memcmp(got, probe, 4) == 0;
+}
+
+bool detect() {
+  uint8_t vTilt = tilt.version();
+  uint8_t vPan  = pan.version();
+  tiltFound = (vTilt == TMC2209_VERSION);
+  panFound  = (vPan == TMC2209_VERSION);
+  Serial.printf("TILT driver (address 1): %s (reply 0x%02X, expect 0x21)\n", tiltFound ? "FOUND" : "NOT FOUND", vTilt);
+  Serial.printf("PAN  driver (address 0): %s (reply 0x%02X, expect 0x21)\n", panFound ? "FOUND" : "NOT FOUND", vPan);
+  if (tiltFound || panFound) return true;
+
+  bool echo = echoTest();
+  Serial.printf("Settings line self-test (ESP32 hears itself through the 1k): %s\n", echo ? "OK" : "FAILED");
+  for (uint8_t a = 2; a < 4; a++) {
+    TMC2209Stepper probe(&Serial2, R_SENSE, a);
+    if (probe.version() == TMC2209_VERSION)
+      Serial.printf("A driver DOES answer at address %u: its MS1 / MS2 pins are wired differently than the map.\n", a);
+  }
+  Serial.println(F("Motors stay off. What this points to:"));
+  if (!echo) {
+    Serial.println(F(" - The ESP32 end of the settings line: the 1k must join TX2 and RX2. Check its two joints."));
+    Serial.println(F(" - Also read the metal can on the ESP32: it must say WROOM, not WROVER."));
+  } else {
+    Serial.println(F(" - Most likely the 12 V was off when the ESP32 started: unplug USB, 12 V on, USB back in."));
+    Serial.println(F(" - Or ESP32 GND not joined to the drivers' GND (wire 2), or wires 12 / 13 on the TX pin instead of RX."));
+  }
+  Serial.println(F("After fixing (power off first), restart, or type d to look again."));
+  return false;
+}
+
+// Select a driver to test. The other one gets its output switched off in software (TOFF = 0).
+void useChannel(const Channel &c, bool quiet = false) {
+  motorsOff();
+  ch = c;
+  TMC2209Stepper *other = (ch.drv == &tilt) ? &pan : &tilt;
+  bool otherFound = (ch.drv == &tilt) ? panFound : tiltFound;
+  if (otherFound) other->toff(0);
+  if (!chFound()) { Serial.printf("%s driver not found - cannot test it.\n", ch.name); return; }
+  runCurrent = START_MA;      // every driver starts its test at the low current
+  configure(*ch.drv);
+  if (quiet) return;
+  Serial.printf("Now testing the %s driver. Its motor plug is the one above it.%s\n", ch.name,
+                otherFound ? " The other driver's output is switched off." : "");
+  printStatus();
+}
+
+// Ask the driver which levels it sees on its EN, STEP and DIR pins (read back over the settings line).
+void pinCheck() {
+  if (!chFound()) { Serial.printf("%s driver not found.\n", ch.name); return; }
+  bool wasOn = motorOn;
+  digitalWrite(EN_PIN, HIGH);
+  struct Chk { const char *name; const char *wire; int pin; uint8_t bit; } chk[3] = {
+    {"EN  ", "D27, wires 6 + 7", EN_PIN, 0}, {"STEP", ch.stepWire, ch.stepPin, 7}, {"DIR ", ch.dirWire, ch.dirPin, 9}};
+  bool allOk = true;
+  for (auto &c : chk) {
+    digitalWrite(c.pin, HIGH); delay(3); bool h = (ch.drv->IOIN() >> c.bit) & 1;
+    digitalWrite(c.pin, LOW);  delay(3); bool l = (ch.drv->IOIN() >> c.bit) & 1;
+    bool ok = h && !l; allOk &= ok;
+    Serial.printf("Pin check %s %s (%s): HIGH -> driver sees %s, LOW -> %s : %s\n", ch.name, c.name, c.wire,
+                  h ? "HIGH" : "LOW", l ? "HIGH" : "LOW", ok ? "OK" : "WRONG - check that wire and its two solder joints");
+  }
+  digitalWrite(EN_PIN, wasOn ? LOW : HIGH);
+  Serial.println(allOk ? F("All three signals reach the driver.") : F("Fix the wire marked WRONG (power off first)."));
+}
+
+// The driver counts every step it receives (MSCNT, 0..1023, 256 per full step).
+void reportCount(uint16_t m0, uint32_t microsteps) {
+  uint16_t m1 = ch.drv->MSCNT();
+  uint16_t expect = (uint16_t)((microsteps * (256 / MICROSTEPS)) % 1024);
+  uint16_t d = (m1 - m0) & 1023;
+  if (expect == 0) return;                                  // whole turns land back on the same count
+  if (d == expect || d == ((1024 - expect) & 1023))
+    Serial.printf("Driver counted the steps: YES (%s).\n", d == expect ? "+" : "-");
+  else
+    Serial.printf("Driver counted the steps: NO (moved %u of %u) - check the STEP wire (%s), or a scrambled reply.\n", d, expect, ch.stepWire);
+}
+
+// GSTAT: bit 0 = the driver restarted (lost power), bit 2 = its charge pump ran short (12 V too low).
+void reportPower() {
+  uint8_t gs = ch.drv->GSTAT();
+  bool reset = gs & 1, uv = gs & 4;
+  if (!reset && !uv) { Serial.println(F("Driver power: steady.")); return; }
+  Serial.printf("Driver power: PROBLEM - %s%s\n", reset ? "the driver RESTARTED during the move" : "",
+                uv ? (reset ? " and its 12 V side ran LOW" : "its 12 V side ran LOW") : "");
+  Serial.println(F(" -> The 12 V sags when the motor pulls current, or VM / GND has a weak joint."));
+  if (reset) { Serial.println(F("    Restoring the driver's settings...")); configure(*ch.drv); }
+  ch.drv->GSTAT(0b111);
+}
+
+// Slow, blocking move. Type x at any time to stop and switch the motor off.
+void move(uint32_t steps, bool forward) {
+  if (!motorOn) { Serial.println(F("Motor is off. Type e first.")); return; }
+  digitalWrite(ch.dirPin, forward ? HIGH : LOW);
+  delayMicroseconds(20);
+  const uint32_t halfPeriod = 500000UL / STEP_RATE;   // microseconds
+  Serial.printf("%s: moving %s %lu microsteps...\n", ch.name, forward ? "forward" : "back", (unsigned long)steps);
+  bool checked = false, openA = false, openB = false, shortAny = false;
+  uint16_t m0 = ch.drv->MSCNT();
+  for (uint32_t i = 0; i < steps; i++) {
+    digitalWrite(ch.stepPin, HIGH); delayMicroseconds(halfPeriod);
+    digitalWrite(ch.stepPin, LOW);  delayMicroseconds(halfPeriod);
+    if (!checked && i == steps / 2) {            // look at the coils once, mid-move, while turning slowly
+      uint32_t ds = ch.drv->DRV_STATUS();
+      openA = ds & (1UL << 6); openB = ds & (1UL << 7);
+      shortAny = ds & 0x3CUL;
+      checked = true;
+    }
+    if ((i & 31) == 0) {
+      yield();
+      if (Serial.available() && Serial.peek() == 'x') { Serial.read(); motorsOff(); Serial.println(F("Stopped.")); return; }
+    }
+  }
+  Serial.println(F("Done."));
+  reportCount(m0, steps);
+  reportPower();
+  if (checked) Serial.printf("During the move: coil A %s | coil B %s | short: %s%s\n",
+                             openA ? "NOT CONNECTED" : "connected", openB ? "NOT CONNECTED" : "connected",
+                             shortAny ? "YES" : "no", spread ? "" : "  (most reliable in SpreadCycle: type c)");
+}
+
+
+// ================= full self-test =================
+int stFails = 0;
+void st(bool ok, const char *what, const char *hint) {
+  Serial.printf("%s  %s\n", ok ? "PASS" : "FAIL", what);
+  if (!ok) { Serial.printf("      -> %s\n", hint); stFails++; }
+}
+
+// one read of a driver's input pins; returns false if the reply was missing or scrambled
+bool readIOIN(TMC2209Stepper &d, uint32_t &io) {
+  d.CRCerror = false;
+  io = d.IOIN();
+  return !d.CRCerror && (io >> 24) == TMC2209_VERSION;
+}
+
+// count missing or scrambled replies out of n reads
+int badReads(TMC2209Stepper &d, int n) {
+  int bad = 0; uint32_t io;
+  for (int i = 0; i < n; i++) if (!readIOIN(d, io)) bad++;
+  return bad;
+}
+
+void motorCheck(const Channel &c) {
+  useChannel(c);
+  if (!chFound()) return;
+  bool wasSpread = spread;
+  spread = true; ch.drv->en_spreadCycle(true);              // coil check is reliable in SpreadCycle
+  digitalWrite(EN_PIN, LOW); motorOn = true; delay(300);
+  uint16_t m0 = ch.drv->MSCNT();
+  digitalWrite(ch.dirPin, HIGH); delayMicroseconds(20);
+  const uint32_t n = STEPS_PER_TURN / 8, half = 500000UL / STEP_RATE;
+  uint32_t ds = 0; bool got = false;
+  for (uint32_t i = 0; i < n; i++) {
+    digitalWrite(ch.stepPin, HIGH); delayMicroseconds(half);
+    digitalWrite(ch.stepPin, LOW);  delayMicroseconds(half);
+    if (i == n / 2) { ch.drv->CRCerror = false; ds = ch.drv->DRV_STATUS(); got = !ch.drv->CRCerror; }
+  }
+  uint16_t d = (ch.drv->MSCNT() - m0) & 1023;
+  digitalWrite(ch.dirPin, LOW); delayMicroseconds(20);
+  for (uint32_t i = 0; i < n; i++) { digitalWrite(ch.stepPin, HIGH); delayMicroseconds(half); digitalWrite(ch.stepPin, LOW); delayMicroseconds(half); }
+  uint8_t gs = ch.drv->GSTAT();
+  digitalWrite(EN_PIN, HIGH); motorOn = false;
+  spread = wasSpread; ch.drv->en_spreadCycle(spread);
+  char what[96], hint[200];
+  snprintf(what, sizeof what, "%s driver counted all its steps", c.name);
+  snprintf(hint, sizeof hint, "STEP pulses lost on the way: check %s and the driver's GND", c.stepWire);
+  st(d == 256 || d == 768, what, hint);
+  bool openA = ds & (1UL << 6), openB = ds & (1UL << 7), sh = ds & 0x3CUL;
+  if (!got) { snprintf(what, sizeof what, "%s coil report readable mid-move", c.name);
+              st(false, what, "The reply was scrambled while the motor ran: see the 'motors switched on' check above."); }
+  else if (openA && openB) {
+    Serial.printf("NOTE  %s: no motor found on this plug. Fine if no motor is plugged in here;\n"
+                  "      if one is, its plug isn't making contact.\n", c.name);
+  } else {
+    snprintf(what, sizeof what, "%s motor coil A carries current", c.name);
+    st(!openA, what, "Coil A gets no current: this alone makes a motor jitter instead of turning.\n"
+                     "         Next: type h (feel each coil), then power off, turn the motor plug around and run t again.\n"
+                     "         FAIL moves to coil B = motor or its cable. FAIL stays on coil A = board or driver.");
+    snprintf(what, sizeof what, "%s motor coil B carries current", c.name);
+    st(!openB, what, "Coil B gets no current: this alone makes a motor jitter instead of turning.\n"
+                     "         Next: type h (feel each coil), then power off, turn the motor plug around and run t again.\n"
+                     "         FAIL moves to coil A = motor or its cable. FAIL stays on coil B = board or driver.");
+  }
+  snprintf(what, sizeof what, "%s no short circuit on the motor outputs", c.name);
+  st(!sh, what, "A motor wire touches GND, 12 V or another wire: power off and check the plug and wires.");
+  snprintf(what, sizeof what, "%s driver power steady while moving (no restart, no low voltage)", c.name);
+  st(!(gs & 5), what, "The driver restarted or ran short of 12 V: check the 12 V and GND path under load.");
+  ch.drv->GSTAT(0b111);
+}
+
+void selfTest() {
+  stFails = 0;
+  motorsOff();
+  Serial.println(F("\n===== FULL SELF-TEST ====="));
+  Serial.println(F("Part 1: signals (no movement)"));
+  st(echoTest(), "Settings line at the ESP32 (RX2, TX2 and the 1k between them)", "Check the 1k's two joints and that it sits across TX2 and RX2.");
+  uint8_t vT = tilt.version(), vP = pan.version();
+  tiltFound = vT == TMC2209_VERSION; panFound = vP == TMC2209_VERSION;
+  st(panFound,  "PAN driver answers at address 0 (wire 12, its 12 V, 3.3 V and GND)", "12 V on before USB? Then wire 12 (RX2 to PAN RX), PAN VIO and PAN GND.");
+  st(tiltFound, "TILT driver answers at address 1 (wire 13, its 12 V, 3.3 V and GND)", "Wire 13 (PAN RX to TILT RX), TILT VIO, TILT GND, and TILT MS1 = 3.3 V.");
+  if (!tiltFound && !panFound) { Serial.println(F("Stopping: no driver answers.")); return; }
+
+  // address pins
+  uint32_t io;
+  if (panFound  && readIOIN(pan, io))  st(!((io >> 2) & 1) && !((io >> 3) & 1), "PAN address pins: MS1 and MS2 both on GND", "Check the PAN MS1 / MS2 ties to the ground bar.");
+  if (tiltFound && readIOIN(tilt, io)) st(((io >> 2) & 1) && !((io >> 3) & 1), "TILT address pins: MS1 on 3.3 V, MS2 on GND", "Check wire 5 (TILT VIO to MS1) and the TILT MS2 tie to the bar.");
+
+  // write path: the driver counts every write it accepts
+  TMC2209Stepper *drvs[2] = {&pan, &tilt}; bool found[2] = {panFound, tiltFound}; const char *names[2] = {"PAN", "TILT"};
+  for (int k = 0; k < 2; k++) {
+    if (!found[k]) continue;
+    uint8_t c0 = drvs[k]->IFCNT();
+    for (int i = 0; i < 10; i++) drvs[k]->TPOWERDOWN(20);
+    uint8_t c1 = drvs[k]->IFCNT();
+    char what[80]; snprintf(what, sizeof what, "%s driver accepts settings sent to it (10 of 10)", names[k]);
+    st((uint8_t)(c1 - c0) == 10, what, "Some writes were lost: the settings line is unreliable (1k, wires 12/13, GND).");
+  }
+
+  // 10k pull-up on EN: let go of D27 and the 10k must hold EN high (motors off at start-up)
+  pinMode(EN_PIN, INPUT); delay(5);
+  bool enHigh = digitalRead(EN_PIN);
+  bool tEnn = tiltFound ? tilt.enn() : true, pEnn = panFound ? pan.enn() : true;
+  pinMode(EN_PIN, OUTPUT); digitalWrite(EN_PIN, HIGH);
+  st(enHigh && tEnn && pEnn, "10k holds EN high when the ESP32 lets go (motors off at start-up)", "10k missing or EN shorted to GND: the 10k at TILT EN / MS1, wires 6 and 7.");
+
+  // EN reaches both drivers
+  digitalWrite(EN_PIN, LOW); delay(3);
+  bool tOn = tiltFound ? !tilt.enn() : true, pOn = panFound ? !pan.enn() : true;
+  digitalWrite(EN_PIN, HIGH); delay(3);
+  bool tOff = tiltFound ? tilt.enn() : true, pOff = panFound ? pan.enn() : true;
+  st(pOn && pOff, "EN (D27, wire 6) reaches the PAN driver", "Check wire 6 (D27 to PAN EN).");
+  st(tOn && tOff, "EN (wire 7) reaches the TILT driver", "Check wire 7 (PAN EN to TILT EN).");
+
+  // STEP / DIR: each line must reach its own driver and nothing else
+  struct Line { const char *what; int pin; int drv; uint8_t bit; const char *hint; } lines[4] = {
+    {"PAN STEP (D25, wire 8) reaches PAN, touches nothing else",   PAN_STEP,  0, 7, "Check wire 8, and for a solder bridge to a neighbouring pin."},
+    {"PAN DIR  (D26, wire 9) reaches PAN, touches nothing else",   PAN_DIR,   0, 9, "Check wire 9, and for a solder bridge to a neighbouring pin."},
+    {"TILT STEP (D32, wire 10) reaches TILT, touches nothing else", TILT_STEP, 1, 7, "Check wire 10, and for a solder bridge to a neighbouring pin."},
+    {"TILT DIR  (D33, wire 11) reaches TILT, touches nothing else", TILT_DIR,  1, 9, "Check wire 11, and for a solder bridge to a neighbouring pin."}};
+  for (auto &L : lines) {
+    if (!found[L.drv]) continue;
+    for (auto &M : lines) digitalWrite(M.pin, LOW);
+    digitalWrite(L.pin, HIGH); delay(3);
+    bool ok = true; uint32_t ioP = 0, ioT = 0;
+    bool rP = !panFound || readIOIN(pan, ioP), rT = !tiltFound || readIOIN(tilt, ioT);
+    ok &= rP && rT;
+    for (auto &M : lines) {
+      if (!found[M.drv]) continue;
+      bool level = ((M.drv == 0 ? ioP : ioT) >> M.bit) & 1;
+      ok &= (level == (&M == &L));
+    }
+    digitalWrite(L.pin, LOW); delay(3);
+    uint32_t back = 0; ok &= readIOIN(*drvs[L.drv], back) && !((back >> L.bit) & 1);
+    st(ok, L.what, L.hint);
+  }
+
+  // the key one for jitter: does switching the motors on disturb the settings line?
+  int offBad = 0, onBad = 0;
+  for (int k = 0; k < 2; k++) if (found[k]) offBad += badReads(*drvs[k], 50);
+  digitalWrite(EN_PIN, LOW); delay(300);                     // motors energised (holding), not moving
+  for (int k = 0; k < 2; k++) if (found[k]) onBad += badReads(*drvs[k], 50);
+  digitalWrite(EN_PIN, HIGH);
+  Serial.printf("      (scrambled replies: %d with motors off, %d with motors on)\n", offBad, onBad);
+  st(offBad == 0, "Settings line clean with the motors off", "Replies scrambled even at rest: check the 1k, wires 12/13 and the ESP32 GND (wire 2).");
+  st(onBad == 0, "Settings line stays clean with the motors switched on",
+     "Switching the motors on disturbs the signals: the 12 V GND path is weak. Check the GND-in hole, the joint at column 3 row 6, and that the supply's minus reaches the drivers' GND.");
+
+  Serial.println(F("Part 2: motors (each plugged-in motor moves 1/8 turn forward and back, in SpreadCycle)"));
+  Channel keep = ch;
+  if (panFound)  motorCheck(PAN_CH);
+  if (tiltFound) motorCheck(TILT_CH);
+  useChannel(keep.drv == &tilt && tiltFound ? TILT_CH : PAN_CH, true);
+
+  Serial.println(F("Not checked by software: 12 V and GND joints under load (use the meter), the capacitors, the 12 V polarity."));
+  if (stFails == 0) Serial.println(F("===== ALL CHECKS PASSED ====="));
+  else Serial.printf("===== %d CHECK(S) FAILED - start with the first FAIL =====\n", stFails);
+}
+
+// ================= coil test: one coil at a time =================
+void pulses(uint32_t n, uint32_t halfUs) {
+  for (uint32_t i = 0; i < n; i++) { digitalWrite(ch.stepPin, HIGH); delayMicroseconds(halfUs); digitalWrite(ch.stepPin, LOW); delayMicroseconds(halfUs); }
+}
+
+// Step at 1/256 until the driver's sine-table position (MSCNT) equals target.
+// MSCNT 256 = all current in coil A, none in B.  MSCNT 0 = all in coil B, none in A.
+// sign learns once which DIR level makes MSCNT count up.
+bool stepToMSCNT(uint16_t target, int &sign) {
+  for (int tries = 0; tries < 4; tries++) {
+    ch.drv->CRCerror = false;
+    uint16_t m = ch.drv->MSCNT() & 1023;
+    if (ch.drv->CRCerror) continue;
+    if (m == target) return true;
+    if (sign == 0) {
+      digitalWrite(ch.dirPin, HIGH); delayMicroseconds(20); pulses(8, 1000);
+      ch.drv->CRCerror = false;
+      uint16_t m2 = ch.drv->MSCNT() & 1023;
+      if (ch.drv->CRCerror) continue;
+      uint16_t d = (m2 - m) & 1023;
+      sign = d == 8 ? 1 : (d == 1016 ? -1 : 0);
+      continue;
+    }
+    uint16_t up = (target - m) & 1023;
+    bool goUp = up <= 512;
+    digitalWrite(ch.dirPin, (goUp == (sign > 0)) ? HIGH : LOW); delayMicroseconds(20);
+    pulses(goUp ? up : 1024 - up, 1000);
+  }
+  ch.drv->CRCerror = false;
+  return (ch.drv->MSCNT() & 1023) == target && !ch.drv->CRCerror;
+}
+
+void coilTest() {
+  if (!chFound()) { Serial.printf("%s driver not found.\n", ch.name); return; }
+  motorsOff();
+  bool wasSpread = spread, isTilt = ch.drv == &tilt;
+  spread = true; ch.drv->en_spreadCycle(true);        // each coil's current regulated on its own
+  ch.drv->rms_current(runCurrent, 1.0);               // full current while standing still, easy to feel
+  ch.drv->microsteps(256);                            // so the driver can be parked exactly
+  ch.drv->GSTAT(0b111);
+  digitalWrite(EN_PIN, LOW); motorOn = true; delay(200);
+  struct Part { const char *coil, *pins, *wires; uint16_t pos; };
+  const Part part[2] = {{"A", "A2 and A1", isTilt ? "14 and 15" : "18 and 19", 256},
+                        {"B", "B1 and B2", isTilt ? "16 and 17" : "20 and 21", 0}};
+  Serial.printf("\n===== %s COIL TEST: one coil at a time, %u mA, the motor stands still =====\n", ch.name, runCurrent);
+  int sign = 0; bool stop = false;
+  for (int k = 0; k < 2 && !stop; k++) {
+    bool there = stepToMSCNT(part[k].pos, sign);
+    ch.drv->CRCerror = false;
+    int16_t a = ch.drv->cur_a(), b = ch.drv->cur_b();
+    bool readOk = !ch.drv->CRCerror;
+    Serial.printf("\nOnly coil %s is powered now (driver pins %s, wires %s).\n", part[k].coil, part[k].pins, part[k].wires);
+    if (readOk) Serial.printf("  Driver's own setting right now: coil A %d%%, coil B %d%%%s\n", abs(a) * 100 / 248, abs(b) * 100 / 248,
+                              there ? "" : "  (not exactly parked - tell me this line)");
+    Serial.println(F("  1. Twist the shaft (or the gear) by hand. Powered, it should feel firmly locked."));
+    Serial.println(F("     Free, or only the light notchy feel it has when off = this coil gets no current."));
+    Serial.println(F("  2. Optional, meter on DC volts. Under the board, touch the probes to the two solder"));
+    Serial.printf("     joints of the plug pins straight above the driver's %s:\n", part[k].pins);
+    Serial.println(F("       about 1 to 3 V = current flows, this coil works"));
+    Serial.println(F("       about 12 V     = the driver pushes, but the coil isn't connected past the plug"));
+    Serial.println(F("       about 0 V      = nothing reaches the plug (the driver, or between driver and plug)"));
+    Serial.println(F("  Holding 20 seconds. Type n + Enter to go on sooner, x + Enter to stop."));
+    delay(30); while (Serial.available()) Serial.read();     // drop the Enter that came with 'h'
+    uint32_t t0 = millis();
+    while (millis() - t0 < 20000UL) {
+      if (Serial.available()) { char c = Serial.read(); if (c == 'x') { stop = true; break; } if (c == 'n') break; }
+      delay(20);
+    }
+    ch.drv->CRCerror = false;
+    uint32_t ds = ch.drv->DRV_STATUS();
+    uint8_t gs = ch.drv->GSTAT();
+    if (!ch.drv->CRCerror && (ds & 0x3CUL)) Serial.println(F("  The driver reported a SHORT while holding this coil: power off, check the plug and wires."));
+    if (gs & 5) Serial.println(F("  The driver restarted or ran short of 12 V while holding: check the 12 V and GND path."));
+  }
+  motorsOff();
+  ch.drv->microsteps(MICROSTEPS);
+  ch.drv->rms_current(runCurrent, 0.5);
+  spread = wasSpread; ch.drv->en_spreadCycle(spread);
+  ch.drv->GSTAT(0b111);
+  Serial.println(stop ? F("Coil test stopped.") : F("\nCoil test done. Tell me for coil A and coil B: locked or free? (and the volts, if you measured)"));
+}
+
+// ================= speed: joystick simulator =================
+// Nine speed levels like a proportional joystick: fine at the bottom, fast at the top.
+// Every speed change is an S-curve over the ramp time (ease-in AND ease-out), whatever the size of the change:
+// that is how a camera head should feel, and a sudden speed change is what makes a stepper lose steps
+// (in quiet mode it can also push the coil current too high).
+const float LEVEL_RPM[10] = {0, 0.5f, 1.1f, 2.5f, 5.5f, 12, 27, 60, 133, 300};   // motor shaft RPM
+struct Ramp { const char *name; float seconds; };
+const Ramp RAMPS[3] = {{"gentle", 2.0f}, {"medium", 1.0f}, {"snappy", 0.4f}};    // time for any speed change
+const float MAX_ACCEL_RPM_S = 2400;   // safety cap: a big change on a short ramp takes a little longer
+int   rampIdx   = 1;
+float gearRatio = 0;     // motor turns per camera turn; 0 = not known yet (k measures it, g sets it)
+
+float rpmToSps(float rpm) { return rpm / 60.0f * STEPS_PER_TURN; }   // microsteps per second
+
+void printRpm(float rpm) {
+  Serial.printf("%.1f RPM motor", rpm);
+  if (gearRatio > 0) Serial.printf(" = %.2f deg/s camera", rpm * 6.0f / gearRatio);
+}
+
+void printLevels() {
+  Serial.println(F("Speed levels:"));
+  for (int i = 1; i <= 9; i++) { Serial.printf("  %d: ", i); printRpm(LEVEL_RPM[i]); Serial.println(); }
+  if (gearRatio <= 0) Serial.println(F("  (camera deg/s shows once the gear ratio is known: k measures it, g sets it)"));
+}
+
+inline void stepPulse() { digitalWrite(ch.stepPin, HIGH); delayMicroseconds(2); digitalWrite(ch.stepPin, LOW); }
+
+// Reads a number typed in the serial monitor (works with or without line endings). NAN if none / cancelled.
+float readNumber(uint32_t waitMs) {
+  char buf[16]; int n = 0; uint32_t t0 = millis(), lastc = 0;
+  while (millis() - t0 < waitMs) {
+    if (Serial.available()) {
+      char c = Serial.read();
+      if (c == '\n' || c == '\r') { if (n) break; continue; }
+      if (c == 'x') return NAN;
+      if (n < 15) buf[n++] = c;
+      lastc = millis();
+    } else if (n && millis() - lastc > 1500) break;
+    delay(5);
+  }
+  buf[n] = 0;
+  return n ? (float)atof(buf) : NAN;
+}
+
+// Ramped move of a fixed number of microsteps (+ forward / - back). Returns false if stopped with x.
+bool rampMove(long steps, float rpm) {
+  const float acc = rpmToSps(60), cap = rpmToSps(rpm);   // 60 RPM per second
+  const long n = labs(steps);
+  digitalWrite(ch.dirPin, steps > 0 ? HIGH : LOW); delayMicroseconds(5);
+  float v = 0; long done = 0; uint32_t last = micros(), lastStep = last;
+  while (done < n) {
+    uint32_t now = micros(); float dt = (now - last) * 1e-6f; last = now;
+    float lim = sqrtf(2.0f * acc * (float)(n - done)), tgt = lim < cap ? lim : cap;
+    if (tgt < 30) tgt = 30;
+    if (v < tgt) { v += acc * dt; if (v > tgt) v = tgt; } else v = tgt;
+    if (v > 1.0f) { uint32_t t = micros(); if ((float)(t - lastStep) >= 1e6f / v) { stepPulse(); done++; lastStep = t; } }
+    if (Serial.available() && Serial.peek() == 'x') { Serial.read(); motorsOff(); Serial.println(F("Stopped.")); return false; }
+  }
+  return true;
+}
+
+void joystick() {
+  if (!chFound()) { Serial.printf("%s driver not found.\n", ch.name); return; }
+  if (!motorOn) { digitalWrite(EN_PIN, LOW); motorOn = true; delay(100); }
+  Serial.printf("\n===== %s JOYSTICK TEST: %s mode, %u mA, %s ramp (%.1f s) =====\n", ch.name,
+                spread ? "SpreadCycle" : "quiet", runCurrent, RAMPS[rampIdx].name, RAMPS[rampIdx].seconds);
+  printLevels();
+  Serial.println(F("Type a level + Enter:  1..9 one way,  -1..-9 the other way,  0 = ease to a stop"));
+  Serial.println(F("  a = next ramp (gentle 2 s / medium 1 s / snappy 0.4 s)   z = ease to a stop, drive back to the start"));
+  Serial.println(F("  q = ease to a stop and leave                x = emergency stop, motor off"));
+  delay(30); while (Serial.available()) Serial.read();       // drop the Enter that came with 'j'
+  long pos = 0;                     // microsteps from where this test started
+  float v = 0;                      // speed now, microsteps per second, + = forward
+  float r0 = 0, r1 = 0, rT = 1;     // current S-curve: from speed r0 to r1 over rT seconds
+  uint32_t rStart = micros();
+  int level = 0, dirNow = 0, home = 0;       // home: 0 off, 1 easing to a stop, 2 driving back
+  bool neg = false, quit = false;
+  float hv = 0;                     // speed while driving back
+  auto ease = [&](float to) {       // start a new S-curve from the current speed
+    r0 = v; r1 = to; rStart = micros();
+    float minT = 1.5f * fabsf(to - v) / rpmToSps(MAX_ACCEL_RPM_S);   // S-curve peak = 1.5 x average
+    rT = RAMPS[rampIdx].seconds > minT ? RAMPS[rampIdx].seconds : minT;
+  };
+  uint32_t last = micros(), lastStep = last, lastPoll = last, lastShow = millis();
+  while (true) {
+    uint32_t now = micros(); float dt = (now - last) * 1e-6f; last = now;
+    int want = v > 0.5f ? 1 : (v < -0.5f ? -1 : 0);
+    // keyboard and status only every 2 ms, so the step timing stays clean at top speed
+    if ((uint32_t)(now - lastPoll) >= 2000) {
+      lastPoll = now;
+      while (Serial.available()) {
+        char c = Serial.read();
+        if (c == '-') { neg = true; continue; }
+        if (c >= '0' && c <= '9') {
+          level = (c - '0') * (neg ? -1 : 1); home = 0; quit = false;
+          ease((level >= 0 ? 1.0f : -1.0f) * rpmToSps(LEVEL_RPM[abs(level)]));
+          if (level == 0) Serial.printf("Level 0 -> easing to a stop over %.1f s\n", rT);
+          else { Serial.printf("Level %+d -> ", level); printRpm(LEVEL_RPM[abs(level)]); Serial.printf(" (over %.1f s)\n", rT); }
+        } else if (c == 'a') { rampIdx = (rampIdx + 1) % 3; Serial.printf("Ramp: %s, %.1f s\n", RAMPS[rampIdx].name, RAMPS[rampIdx].seconds); }
+        else if (c == 'z') { home = 1; quit = false; level = 0; ease(0); Serial.println(F("Easing to a stop, then driving back to the start mark...")); }
+        else if (c == 'q') { quit = true; home = 0; level = 0; ease(0); }
+        else if (c == 'x') { motorsOff(); Serial.printf("Emergency stop at %+.2f turns from the start.\n", pos / (float)STEPS_PER_TURN); return; }
+        neg = false;
+      }
+      if (want != 0 && millis() - lastShow >= 1000) {
+        lastShow = millis();
+        Serial.printf("  now "); printRpm(fabsf(v) * 60.0f / STEPS_PER_TURN); Serial.printf(" | %+.2f turns from start\n", pos / (float)STEPS_PER_TURN);
+      }
+      if (quit && want == 0 && r1 == 0) {
+        Serial.printf("Stopped, %+.2f turns from the start. Motor holding (x = off).\n", pos / (float)STEPS_PER_TURN);
+        return;
+      }
+    }
+    if (home == 2) {
+      // drive back: speed up and slow down at a steady rate set by the ramp, top 60 RPM, land exactly on 0
+      const float acc = rpmToSps(60) / RAMPS[rampIdx].seconds, cap = rpmToSps(60);
+      if (pos == 0) { v = hv = 0; r0 = r1 = 0; home = 0; Serial.println(F("Back at the start. Is the flag exactly on the mark?")); }
+      else {
+        float lim = sqrtf(2.0f * acc * (float)labs(pos)), tgt = lim < cap ? lim : cap;
+        if (hv < tgt) { hv += acc * dt; if (hv > tgt) hv = tgt; } else hv = tgt;
+        v = (pos > 0 ? -1.0f : 1.0f) * hv;
+      }
+    } else {
+      float u = (float)(now - rStart) / (rT * 1e6f);
+      if (u >= 1.0f) v = r1; else v = r0 + (r1 - r0) * u * u * (3.0f - 2.0f * u);
+      if (home == 1 && u >= 1.0f) { home = 2; hv = 0; }
+    }
+    want = v > 0.5f ? 1 : (v < -0.5f ? -1 : 0);
+    if (want != 0 && want != dirNow) { digitalWrite(ch.dirPin, want > 0 ? HIGH : LOW); delayMicroseconds(5); dirNow = want; }
+    // each step comes one period after the last one at the current speed - never early, never in bursts
+    if (want != 0) { uint32_t t = micros(); if ((float)(t - lastStep) >= 1e6f / fabsf(v)) { stepPulse(); pos += dirNow; lastStep = t; } }
+  }
+}
+
+// Measures the gear ratio on the head: exactly 5 motor turns, you read the camera's tilt angle.
+void gearCheck() {
+  if (!chFound()) { Serial.printf("%s driver not found.\n", ch.name); return; }
+  Serial.println(F("\n===== GEAR CHECK (motor mounted on the head) ====="));
+  Serial.println(F("Put a phone level app on the camera plate and zero it."));
+  Serial.println(F("Type n + Enter to start: the motor turns exactly 5 turns, slowly. (x cancels)"));
+  delay(30); while (Serial.available()) Serial.read();
+  uint32_t t0 = millis(); char c = 0;
+  while (millis() - t0 < 120000UL) { if (Serial.available()) { c = Serial.read(); if (c == 'n' || c == 'x') break; } delay(10); }
+  if (c != 'n') { Serial.println(F("Gear check cancelled.")); return; }
+  if (!motorOn) { digitalWrite(EN_PIN, LOW); motorOn = true; delay(100); }
+  if (!rampMove(5L * STEPS_PER_TURN, 27)) return;
+  Serial.println(F("Done. Type the angle the camera tilted, in degrees, + Enter (e.g. 50):"));
+  float ang = readNumber(120000UL);
+  if (ang > 0) {
+    gearRatio = 5.0f * 360.0f / ang;
+    Serial.printf("Gear ratio = %.2f motor turns per camera turn (set until restart; g%.1f sets it again).\n", gearRatio, gearRatio);
+    printLevels();
+  } else Serial.println(F("No angle entered - gear ratio unchanged."));
+  Serial.println(F("Driving back 5 turns..."));
+  rampMove(-5L * STEPS_PER_TURN, 27);
+}
+
+void setup() {
+  // Motors off before anything else
+  pinMode(EN_PIN, OUTPUT); digitalWrite(EN_PIN, HIGH);
+  const int outs[] = {TILT_STEP, TILT_DIR, PAN_STEP, PAN_DIR};
+  for (int p : outs) { pinMode(p, OUTPUT); digitalWrite(p, LOW); }
+
+  Serial.begin(115200);
+  delay(500);
+  Serial.println();
+  Serial.println(F("=== Head rig: motor test (tilt first, m switches to pan) ==="));
+
+  Serial2.begin(115200, SERIAL_8N1, UART_RX, UART_TX);
+  delay(100);
+
+  if (!detect()) return;
+  useChannel(tiltFound ? TILT_CH : PAN_CH);
+  pinCheck();
+  Serial.println(F("Ready. Type e to switch the motor on, then f or b to move it a little."));
+  printHelp();
+}
+
+void loop() {
+  if (!Serial.available()) return;
+  char c = Serial.read();
+  switch (c) {
+    case 'e': motorsOn(); break;
+    case 'x': motorsOff(); break;
+    case 'f': move(STEPS_PER_TURN / 8, true); break;
+    case 'b': move(STEPS_PER_TURN / 8, false); break;
+    case 'r': move(STEPS_PER_TURN, true); if (motorOn) { delay(500); move(STEPS_PER_TURN, false); } break;
+    case 'w': if (!motorOn) { Serial.println(F("Motor is off. Type e first.")); break; }
+              { uint16_t m0 = ch.drv->MSCNT(); digitalWrite(ch.dirPin, HIGH);
+                for (int k = 0; k < (int)MICROSTEPS; k++) { digitalWrite(ch.stepPin, HIGH); delayMicroseconds(20); digitalWrite(ch.stepPin, LOW); delay(60); }
+                Serial.println(F("One full step forward (1.8 degrees). Each w should nudge the shaft the same way."));
+                reportCount(m0, MICROSTEPS); reportPower(); } break;
+    case '+': if (chFound()) setCurrent(runCurrent + 100); break;
+    case '-': if (chFound()) setCurrent(runCurrent - 100); break;
+    case 'c': if (chFound()) { spread = !spread; ch.drv->en_spreadCycle(spread);
+                Serial.println(spread ? F("SpreadCycle mode (a little noisier, good for testing).") : F("Quiet mode (StealthChop).")); } break;
+    case 'm': useChannel(ch.drv == &tilt ? PAN_CH : TILT_CH); if (chFound()) pinCheck(); break;
+    case 'p': pinCheck(); break;
+    case 's': printStatus(); break;
+    case 't': selfTest(); break;
+    case 'h': coilTest(); break;
+    case 'j': joystick(); break;
+    case 'k': gearCheck(); break;
+    case 'g': { float g = readNumber(3000);
+                if (g > 0) { gearRatio = g; Serial.printf("Gear ratio set to %.2f motor turns per camera turn.\n", gearRatio); printLevels(); }
+                else Serial.println(F("Type g and the ratio, e.g. g36 + Enter.")); } break;
+    case 'd': motorsOff(); if (detect()) useChannel(ch.drv == &tilt && tiltFound ? TILT_CH : (panFound ? PAN_CH : TILT_CH)); break;
+    case '\r': case '\n': case ' ': break;
+    default: printHelp(); break;
+  }
+}

@@ -1,0 +1,2 @@
+{ "name": "X70 joystick box", "version": "BUILD_NUMBER", "new_install_prompt_erase": true,
+  "builds": [ { "chipFamily": "ESP32", "parts": [ { "path": "x70_joystick.merged.bin", "offset": 0 } ] } ] }
