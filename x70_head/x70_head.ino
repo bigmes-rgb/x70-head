@@ -281,7 +281,7 @@ void viscaPoll() {
   // TCP (Face Tracker PTZ "VISCA over TCP")
   if (!viscaClient || !viscaClient.connected()) {
     if (viscaClient) { viscaClient.stop(); pan.viscaCmd = tilt.viscaCmd = 0; len = 0; }     // tracker went away: stop
-    WiFiClient c = viscaTcp.available();
+    WiFiClient c = viscaTcp.accept();
     if (c) { viscaClient = c; viscaClient.setNoDelay(true); len = 0; }
   }
   if (viscaClient && viscaClient.connected()) {
