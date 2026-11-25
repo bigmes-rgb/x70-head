@@ -29,11 +29,7 @@ const char *FW_FILE = "x70_joystick.bin";
 const char *AP_NAME = "X70-Joystick";
 const char *DEFAULT_PASS = "x70head123";   // device password until you change it on the box's page
 
-// If pushing the stick sideways tilts the camera instead of panning, change SWAP_AXES to true.
-// If left/right or up/down is backwards on the stick (but right on the phone page), change that FLIP to true.
-const bool SWAP_AXES = false;
-const bool FLIP_LEFT_RIGHT = false;
-const bool FLIP_UP_DOWN = false;
+// Stick directions are settings on the box's own page (http://x70joystick.local), not in this code.
 
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -58,6 +54,7 @@ WiFiUDP udp;
 WiFiUDP cmdUdp;                          // the head tells the box to update on port 52379
 String wifiSsid, wifiPass, devPass;      // stored in the box (its own page)
 bool apMode = false, updateRequested = false;
+bool swapAxes = true, flipLR = false, flipUD = false;   // stick direction settings (box page)
 IPAddress headIP;                        // learned from the head's answers, or looked up by name
 uint32_t headAckMs = 0;                  // last time the head answered
 int headBuild = -1;
@@ -131,6 +128,7 @@ void setup() {
   if (A.centre < 300 || A.centre > 3800 || B.centre < 300 || B.centre > 3800)
     Serial.println(F("A centre reading is far off: check that sensor's three wires (3V3 / signal / GND)."));
   wifiSsid = prefs.getString("ssid", ""); wifiPass = prefs.getString("wpass", ""); devPass = prefs.getString("dpass", DEFAULT_PASS);
+  swapAxes = prefs.getBool("swap", true); flipLR = prefs.getBool("flx", false); flipUD = prefs.getBool("fly", false);
   Serial.printf("Build %d\n", FW_BUILD);
   WiFi.setHostname("x70joystick");
   if (wifiSsid.length()) {
@@ -151,6 +149,8 @@ void setup() {
     h += FW_BUILD; h += apMode ? F(" &middot; not on a Wi-Fi yet") : F(" &middot; connected");
     h += (headAckMs && millis() - headAckMs < 6000) ? F(" &middot; head answering") : F(" &middot; head NOT answering");
     if (fwMsg.length()) { h += "<br>"; h += fwMsg; }
+    h += F("</p><p><b>Stick directions</b> (tap to change, works straight away)<br>"
+           "<a href='/dir?k=swap'>Swap left/right with up/down</a><br><a href='/dir?k=flx'>Reverse left/right</a><br><a href='/dir?k=fly'>Reverse up/down</a>");
     h += F("</p><form method=post action=/wifisave>Wi-Fi name (same as the head)<br><input name=s style='width:100%;font-size:16px' value='");
     h += wifiSsid;
     h += F("'><br><br>Wi-Fi password<br><input name=p type=password style='width:100%;font-size:16px'><br><br>"
@@ -158,6 +158,13 @@ void setup() {
            "<button style='font-size:16px;padding:10px 20px'>Save and restart</button></form>"
            "<p><a href='/fwgo'>Update this box from GitHub</a> &middot; <a href='/update'>Upload a .bin by hand</a></p>");
     web.send(200, "text/html", h);
+  });
+  web.on("/dir", []() {
+    String k = web.arg("k");
+    if (k == "swap") { swapAxes = !swapAxes; prefs.putBool("swap", swapAxes); }
+    if (k == "flx")  { flipLR = !flipLR; prefs.putBool("flx", flipLR); }
+    if (k == "fly")  { flipUD = !flipUD; prefs.putBool("fly", flipUD); }
+    web.sendHeader("Location", "/"); web.send(302, "text/plain", "");
   });
   web.on("/wifisave", HTTP_POST, []() {
     String s = web.arg("s"), p = web.arg("p"), d = web.arg("d");
@@ -207,9 +214,9 @@ void loop() {
   if (now - lastSend >= 50) {                                     // 20 times a second
     lastSend = now;
     float a = readAxis(A), b = readAxis(B);
-    float x = SWAP_AXES ? a : b, y = SWAP_AXES ? b : a;           // side sensor = left/right, top sensor = up/down
-    if (FLIP_LEFT_RIGHT) x = -x;
-    if (FLIP_UP_DOWN) y = -y;
+    float x = swapAxes ? a : b, y = swapAxes ? b : a;           // side sensor = left/right, top sensor = up/down
+    if (flipLR) x = -x;
+    if (flipUD) y = -y;
     bool moving = fabsf(x) > 0.05f || fabsf(y) > 0.05f;
     if (wasMoving && !moving) zerosLeft = 5;                      // tell the head clearly that the stick was let go
     if (wifi && (moving || zerosLeft > 0)) {
