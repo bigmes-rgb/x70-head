@@ -69,6 +69,8 @@ String wifiSsid, wifiPass, devPass;      // stored in the device (Wi-Fi page)
 int  latestBuild = -1, joyBuild = -1;    // newest build on GitHub; build the joystick box reports
 uint32_t joySeenMs = 0;
 bool updateRequested = false;
+bool autoUpdate = true;                   // check GitHub by itself and install new builds while the head is idle
+uint32_t lastInputMs = 0;                // last joystick / OBS command
 String fwMsg = "";
 
 struct Axis {
@@ -106,6 +108,7 @@ void loadAll() {
   prefs.begin("x70head", false);
   maxRpm = prefs.getFloat("max", 120); ramp = prefs.getFloat("ramp", 1.0f);
   wifiSsid = prefs.getString("ssid", ""); wifiPass = prefs.getString("wpass", ""); devPass = prefs.getString("dpass", DEFAULT_PASS);
+  autoUpdate = prefs.getBool("auto", true);
   for (Axis *x : AX) {
     x->invert = prefs.getBool(k(*x, "inv").c_str(), false);
     x->gear   = prefs.getFloat(k(*x, "gear").c_str(), 0);
@@ -255,6 +258,7 @@ int viscaHandle(const uint8_t *p, int n, uint8_t *out) {
     if (n >= 9 && p[2] == 0x06 && p[3] == 0x01) {                           // pan/tilt drive
       float ps = viscaSpeed(p[4], 0x18), ts = viscaSpeed(p[5], 0x14);
       pan.viscaCmd  = p[6] == 0x01 ? -ps : (p[6] == 0x02 ? ps : 0);         // 01 left, 02 right
+      if (p[6] != 0x03 || p[7] != 0x03) lastInputMs = millis();
       tilt.viscaCmd = p[7] == 0x01 ? ts : (p[7] == 0x02 ? -ts : 0);         // 01 up, 02 down
     } else if (n >= 15 && p[2] == 0x06 && (p[3] == 0x02 || p[3] == 0x03)) { // absolute / relative position
       if (pan.gear > 0 && tilt.gear > 0 && pan.st && tilt.st) {
@@ -341,7 +345,7 @@ void joyInput(float x, float y) {                       // x, y from -1 to 1
   auto curve = [](float u) { float m = fabsf(u); if (m < 0.06f) return 0.0f; m = (m - 0.06f) / 0.94f; return (u < 0 ? -1.0f : 1.0f) * powf(m, 2.2f); };   // fine control near the middle
   pan.webCmd = curve(constrain(x, -1.0f, 1.0f)) * maxSps(); tilt.webCmd = curve(constrain(y, -1.0f, 1.0f)) * maxSps();
   lastWebMs = millis();
-  if (pan.webCmd != 0 || tilt.webCmd != 0) manualUntil = lastWebMs + MANUAL_HOLD_MS;
+  if (pan.webCmd != 0 || tilt.webCmd != 0) { manualUntil = lastWebMs + MANUAL_HOLD_MS; lastInputMs = lastWebMs; }
 }
 void recallPreset(int n) {
   if (n >= 0 && n < NPRESET && presetSet[n]) { manualUntil = millis() + MANUAL_HOLD_MS; pan.viscaCmd = tilt.viscaCmd = 0; gotoPos(presetPos[n][0], presetPos[n][1]); }
@@ -402,6 +406,7 @@ Pan <input id="gp" type="number" step="0.01"> Tilt <input id="gt" type="number" 
 <details><summary>Update and Wi-Fi</summary>
 <p id="fw" style="font-size:13px;color:#cfd6df;white-space:pre-line"></p>
 <div class="g2"><button onclick="$('fw').textContent='Checking...';q('/fw')">Check for update</button><button onclick="if(confirm('Update the head and the joystick box now? Both restart.')){q('/fwgo')}">Update both now</button></div>
+<button id="au" style="width:100%" onclick="q('/set?auto=1')"></button>
 <button style="width:100%" onclick="location.href='/wifi'">Wi-Fi and password</button>
 </details></div>
 <script>
@@ -421,6 +426,8 @@ if(document.activeElement!=$('gp')&&document.activeElement!=$('gt')){$('gp').val
 $('trk').textContent=s.trk?'Face tracking allowed (tap to block)':'Face tracking BLOCKED (tap to allow)';$('trk').className=s.trk?'':'sv';
 $('mo').textContent=s.on?'Switch motors OFF (camera may sag)':'Switch motors ON';
 for(var i=0;i<6;i++){$('p'+i).className=s.ps[i]?'on':''}
+$('au').textContent=s.auto?'Automatic updates: ON (tap to turn off)':'Automatic updates: OFF (tap to turn on)';$('au').className=s.auto?'on':'';
+if(s.lat>s.fw&&s.fw>0)w+='Update available: build '+s.lat+'. ';$('warn').textContent=w;
 $('fw').textContent='Head: build '+s.fw+'\nJoystick box: '+(s.jon?'build '+s.jfw:'not seen')+'\nNewest on GitHub: '+(s.lat<0?'not checked yet':'build '+s.lat)+(s.msg?'\n'+s.msg:'')}
 function q(u){return fetch(u).then(function(r){return r.json()}).then(show).catch(function(){$('st').textContent='no connection to the head'})}
 function lim(a,e){q('/lim?a='+a+'&e='+e)}
@@ -442,11 +449,11 @@ void sendStatus() {
   char b[620];
   snprintf(b, sizeof b,
     "{\"on\":%d,\"trk\":%d,\"src\":%d,\"pd\":%.2f,\"td\":%.2f,\"pt\":%.3f,\"tt\":%.3f,\"gp\":%.2f,\"gt\":%.2f,\"pl\":%d,\"tl\":%d,\"dp\":%d,\"dt\":%d,"
-    "\"max\":%d,\"ramp\":%.1f,\"rssi\":%d,\"ps\":[%d,%d,%d,%d,%d,%d],\"fw\":%d,\"lat\":%d,\"jfw\":%d,\"jon\":%d,\"msg\":\"%s\"}",
+    "\"max\":%d,\"ramp\":%.1f,\"rssi\":%d,\"ps\":[%d,%d,%d,%d,%d,%d],\"fw\":%d,\"auto\":%d,\"lat\":%d,\"jfw\":%d,\"jon\":%d,\"msg\":\"%s\"}",
     motorsOn, trackingOn, src, stepsToDeg(pan, pp), stepsToDeg(tilt, tp), pp / STEPS_PER_TURN, tp / STEPS_PER_TURN, pan.gear, tilt.gear,
     limited(pan), limited(tilt), pan.found, tilt.found, (int)maxRpm, ramp, (int)WiFi.RSSI(),
     presetSet[0], presetSet[1], presetSet[2], presetSet[3], presetSet[4], presetSet[5],
-    FW_BUILD, latestBuild, joyBuild, (int)(joySeenMs != 0 && millis() - joySeenMs < 6000), fwMsg.c_str());
+    FW_BUILD, autoUpdate, latestBuild, joyBuild, (int)(joySeenMs != 0 && millis() - joySeenMs < 6000), fwMsg.c_str());
   web.send(200, "application/json", b);
 }
 
@@ -466,6 +473,7 @@ void webSetup() {
     if (web.hasArg("invp")) { pan.invert = !pan.invert; prefs.putBool("pinv", pan.invert); }
     if (web.hasArg("invt")) { tilt.invert = !tilt.invert; prefs.putBool("tinv", tilt.invert); }
     if (web.hasArg("gp"))   { pan.gear = fmaxf(0, web.arg("gp").toFloat()); prefs.putFloat("pgear", pan.gear); }
+    if (web.hasArg("auto")) { autoUpdate = !autoUpdate; prefs.putBool("auto", autoUpdate); }
     if (web.hasArg("gt"))   { tilt.gear = fmaxf(0, web.arg("gt").toFloat()); prefs.putFloat("tgear", tilt.gear); }
     sendStatus();
   });
@@ -586,6 +594,20 @@ void loop() {
   ArduinoOTA.handle();
   viscaPoll();
   joyBoxPoll();
+  // Automatic updates: look at GitHub every 10 minutes, but only while nothing is happening
+  // (no joystick or OBS command and no movement for 5 minutes, or the first minutes after power-up).
+  static uint32_t lastCheck = 0, lastJoyNudge = 0;
+  bool online = WiFi.getMode() == WIFI_STA && WiFi.status() == WL_CONNECTED;
+  bool quiet = !headMoving() && pan.viscaCmd == 0 && tilt.viscaCmd == 0 && pan.webCmd == 0 && tilt.webCmd == 0 &&
+               ((lastInputMs == 0 && lastMoveMs == 0) || (now - lastInputMs > 300000UL && now - lastMoveMs > 300000UL));
+  if (online && quiet && now > 45000UL && (lastCheck == 0 || now - lastCheck > 600000UL)) {
+    lastCheck = now;
+    checkLatest();
+    if (autoUpdate && FW_BUILD > 0 && latestBuild > FW_BUILD) { Serial.printf("New build %d found: updating\n", latestBuild); updateRequested = true; }
+  }
+  // joystick box still on an older build (it was off during the last update): tell it again, at most every 5 minutes
+  if (online && quiet && autoUpdate && latestBuild > 0 && joyBuild > 0 && joyBuild < latestBuild && now - joySeenMs < 6000 &&
+      (lastJoyNudge == 0 || now - lastJoyNudge > 300000UL)) { lastJoyNudge = now; broadcastText("U", 52379); }
   if (updateRequested && !headMoving()) {
     updateRequested = false;
     for (int i = 0; i < 3; i++) { broadcastText("U", 52379); delay(30); }   // tell the joystick box to update itself too
