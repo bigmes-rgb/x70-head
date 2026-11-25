@@ -1,5 +1,5 @@
 /*
-  X70 JOYSTICK BOX v1.2  -  Vidpro control box with an ESP32 inside
+  X70 JOYSTICK BOX  -  Vidpro control box with an ESP32 inside
   Reads the original proportional stick and the two push buttons and sends them to the head over Wi-Fi.
   It finds the head by itself (same Wi-Fi network). Power: any USB port or phone charger.
 
@@ -39,6 +39,7 @@ const bool FLIP_UP_DOWN = false;
 #include <WiFiUdp.h>
 #include <Preferences.h>
 #include <ArduinoOTA.h>
+#include <ESPmDNS.h>
 #include <WebServer.h>
 #include <HTTPUpdateServer.h>
 #include <WiFiClientSecure.h>
@@ -57,6 +58,9 @@ WiFiUDP udp;
 WiFiUDP cmdUdp;                          // the head tells the box to update on port 52379
 String wifiSsid, wifiPass, devPass;      // stored in the box (its own page)
 bool apMode = false, updateRequested = false;
+IPAddress headIP;                        // learned from the head's answers, or looked up by name
+uint32_t headAckMs = 0;                  // last time the head answered
+int headBuild = -1;
 String fwMsg = "";
 WebServer web(80);
 HTTPUpdateServer webUpdater;
@@ -83,9 +87,13 @@ float readAxis(AxisIn &x) {
   return constrain(v, -1.0f, 1.0f);
 }
 
-void sendToHead(const char *msg) {
-  IPAddress bc = WiFi.localIP(); bc[3] = 255;                                 // everyone on this network: the head is listening
-  udp.beginPacket(bc, HEAD_PORT); udp.write((const uint8_t *)msg, strlen(msg)); udp.endPacket();
+void sendTo(IPAddress to, const char *msg) { udp.beginPacket(to, HEAD_PORT); udp.write((const uint8_t *)msg, strlen(msg)); udp.endPacket(); }
+bool headKnown() { return headIP[0] != 0; }
+void sendToHead(const char *msg) {            // straight to the head once its address is known...
+  if (headKnown()) sendTo(headIP, msg);
+  if (!headKnown() || millis() - headAckMs > 5000) {   // ...and to everyone on the network while it is not answering
+    IPAddress bc = WiFi.localIP(); bc[3] = 255; sendTo(bc, msg);
+  }
 }
 void sendEvent(const char *what) {            // sent three times in case one is lost; the head acts once per id
   char m[32]; snprintf(m, sizeof m, "B,%lu,%s", (unsigned long)++evtId, what);
@@ -119,7 +127,7 @@ void setup() {
   A.centre = ca / 20; B.centre = cb / 20;
   b1.last = digitalRead(PIN_BTN1) == LOW; b2.last = digitalRead(PIN_BTN2) == LOW;
   evtId = esp_random() & 0xFFFFF;
-  Serial.printf("\n=== X70 joystick box v1.2 ===\nCentre: top sensor %d, side sensor %d (expect roughly 1500 to 2600)\n", A.centre, B.centre);
+  Serial.printf("\n=== X70 joystick box ===\nCentre: top sensor %d, side sensor %d (expect roughly 1500 to 2600)\n", A.centre, B.centre);
   if (A.centre < 300 || A.centre > 3800 || B.centre < 300 || B.centre > 3800)
     Serial.println(F("A centre reading is far off: check that sensor's three wires (3V3 / signal / GND)."));
   wifiSsid = prefs.getString("ssid", ""); wifiPass = prefs.getString("wpass", ""); devPass = prefs.getString("dpass", DEFAULT_PASS);
@@ -141,6 +149,7 @@ void setup() {
   web.on("/", []() {
     String h = F("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><body style='font:16px sans-serif;max-width:420px;margin:auto;padding:16px'><h3>X70 joystick box</h3><p>Build ");
     h += FW_BUILD; h += apMode ? F(" &middot; not on a Wi-Fi yet") : F(" &middot; connected");
+    h += (headAckMs && millis() - headAckMs < 6000) ? F(" &middot; head answering") : F(" &middot; head NOT answering");
     if (fwMsg.length()) { h += "<br>"; h += fwMsg; }
     h += F("</p><form method=post action=/wifisave>Wi-Fi name (same as the head)<br><input name=s style='width:100%;font-size:16px' value='");
     h += wifiSsid;
@@ -173,8 +182,8 @@ void selfUpdate() {                            // downloads and installs the new
 }
 
 void loop() {
-  static uint32_t lastSend = 0, lastPrint = 0, lastTry = 0, bothSince = 0, lastBeat = 0;
-  static bool wasMoving = false; static int zerosLeft = 0;
+  static uint32_t lastSend = 0, lastPrint = 0, lastTry = 0, bothSince = 0, lastBeat = 0, lastLookup = 0;
+  static bool wasMoving = false, stickBusy = false; static int zerosLeft = 0;
   uint32_t now = millis();
   ArduinoOTA.handle();
   web.handleClient();
@@ -182,7 +191,17 @@ void loop() {
   digitalWrite(PIN_LED, wifi ? HIGH : (now / (apMode ? 120 : 300)) % 2);   // slow blink = looking for Wi-Fi, fast blink = setup mode
   if (!apMode && !wifi && now - lastTry > 8000) { lastTry = now; WiFi.reconnect(); }
   if (wifi && now - lastBeat > 2000) { lastBeat = now; char m[24]; snprintf(m, sizeof m, "H,%d", FW_BUILD); sendToHead(m); }   // "I'm here, build N"
-  if (cmdUdp.parsePacket() > 0) { char c = cmdUdp.read(); while (cmdUdp.available()) cmdUdp.read(); if (c == 'U') updateRequested = true; }
+  if (cmdUdp.parsePacket() > 0) {
+    char b[16]; int n = cmdUdp.read((uint8_t *)b, sizeof b - 1); b[n > 0 ? n : 0] = 0;
+    if (b[0] == 'U') updateRequested = true;
+    else if (b[0] == 'A') { headIP = cmdUdp.remoteIP(); headAckMs = now; headBuild = atoi(b + 2); }   // the head answered a heartbeat
+  }
+  // head not answering: look it up by its name (x70head.local). Only while the stick is at rest, it takes a moment.
+  if (wifi && !stickBusy && (headAckMs == 0 || now - headAckMs > 10000) && (lastLookup == 0 || now - lastLookup > 15000)) {
+    lastLookup = now;
+    IPAddress ip = MDNS.queryHost("x70head", 1500);
+    if (ip[0] != 0) { headIP = ip; Serial.printf("Found the head by name at %s\n", ip.toString().c_str()); }
+  }
   if (updateRequested && wifi) { updateRequested = false; selfUpdate(); }
 
   if (now - lastSend >= 50) {                                     // 20 times a second
@@ -198,8 +217,9 @@ void loop() {
       sendToHead(m);
       if (!moving) zerosLeft--;
     }
-    wasMoving = moving;
-    if (now - lastPrint > 500) { lastPrint = now; Serial.printf("x %+.2f  y %+.2f  %s\n", x, y, wifi ? "wifi ok" : "NO WIFI"); }
+    wasMoving = moving; stickBusy = moving || zerosLeft > 0;
+    if (now - lastPrint > 500) { lastPrint = now; Serial.printf("x %+.2f  y %+.2f  %s  %s\n", x, y, wifi ? "wifi ok" : "NO WIFI",
+                                                                  (headAckMs && now - headAckMs < 6000) ? "head ok" : "HEAD NOT ANSWERING"); }
   }
   if (spanDirty && now - spanDirtyMs > 3000) { spanDirty = false; saveSpan(A); saveSpan(B); }   // remember the learned range
 

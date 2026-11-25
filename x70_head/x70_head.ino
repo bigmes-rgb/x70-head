@@ -68,6 +68,7 @@ Preferences prefs;
 String wifiSsid, wifiPass, devPass;      // stored in the device (Wi-Fi page)
 int  latestBuild = -1, joyBuild = -1;    // newest build on GitHub; build the joystick box reports
 uint32_t joySeenMs = 0;
+IPAddress joyIP;                         // where the joystick box was last heard from
 bool updateRequested = false;
 bool autoUpdate = true;                   // check GitHub by itself and install new builds while the head is idle
 uint32_t lastInputMs = 0;                // last joystick / OBS command
@@ -327,6 +328,8 @@ void checkLatest() {                           // asks GitHub for the newest bui
     h.end();
   } else fwMsg = "Could not reach GitHub";
 }
+void sendText(IPAddress to, const char *msg, int port) { WiFiUDP u; u.beginPacket(to, port); u.write((const uint8_t *)msg, strlen(msg)); u.endPacket(); }
+void tellJoystick(const char *msg);
 void broadcastText(const char *msg, int port) {
   IPAddress ip = WiFi.getMode() == WIFI_AP ? WiFi.softAPIP() : WiFi.localIP(), bc = ip; bc[3] = 255;
   WiFiUDP u; u.beginPacket(bc, port); u.write((const uint8_t *)msg, strlen(msg)); u.endPacket();
@@ -338,6 +341,11 @@ void selfUpdate() {                            // downloads and installs the new
   httpUpdate.rebootOnUpdate(true);
   t_httpUpdate_return r = httpUpdate.update(c, String(FW_BASE) + FW_FILE);
   if (r == HTTP_UPDATE_FAILED) fwMsg = "Update failed: " + httpUpdate.getLastErrorString();
+}
+
+void tellJoystick(const char *msg) {          // straight to the box if its address is known, and to everyone as a fallback
+  if (joyIP[0] != 0) sendText(joyIP, msg, 52379);
+  broadcastText(msg, 52379);
 }
 
 // ---------------- joystick input (page and joystick box) ----------------
@@ -358,8 +366,12 @@ void joyBoxPoll() {
     if (sz <= 0) return;
     char b[40]; int n = joyUdp.read((uint8_t *)b, sizeof b - 1); if (n <= 0) continue; b[n] = 0;
     float x, y; long id; int k;
+    joyIP = joyUdp.remoteIP();
     if (sscanf(b, "J,%f,%f", &x, &y) == 2) { joyInput(x, y); joySeenMs = millis(); }
-    else if (sscanf(b, "H,%d", &k) == 1) { joyBuild = k; joySeenMs = millis(); }      // joystick box heartbeat with its build number
+    else if (sscanf(b, "H,%d", &k) == 1) {                                           // joystick box heartbeat with its build number
+      joyBuild = k; joySeenMs = millis();
+      char a[16]; snprintf(a, sizeof a, "A,%d", FW_BUILD); sendText(joyIP, a, 52379);  // answer, so the box learns the head's address
+    }
     else if (sscanf(b, "B,%ld,P,%d", &id, &k) == 2) { if (id != lastId) { lastId = id; recallPreset(k); } }
     else if (sscanf(b, "B,%ld,T", &id) == 1 && strchr(b, 'T')) { if (id != lastId) { lastId = id; trackingOn = !trackingOn; if (!trackingOn) pan.viscaCmd = tilt.viscaCmd = 0; } }
   }
@@ -607,10 +619,10 @@ void loop() {
   }
   // joystick box still on an older build (it was off during the last update): tell it again, at most every 5 minutes
   if (online && quiet && autoUpdate && latestBuild > 0 && joyBuild > 0 && joyBuild < latestBuild && now - joySeenMs < 6000 &&
-      (lastJoyNudge == 0 || now - lastJoyNudge > 300000UL)) { lastJoyNudge = now; broadcastText("U", 52379); }
+      (lastJoyNudge == 0 || now - lastJoyNudge > 300000UL)) { lastJoyNudge = now; tellJoystick("U"); }
   if (updateRequested && !headMoving()) {
     updateRequested = false;
-    for (int i = 0; i < 3; i++) { broadcastText("U", 52379); delay(30); }   // tell the joystick box to update itself too
+    for (int i = 0; i < 3; i++) { tellJoystick("U"); delay(30); }   // tell the joystick box to update itself too
     delay(300);
     selfUpdate();                                                           // restarts on success
   }
