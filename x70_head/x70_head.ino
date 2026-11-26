@@ -54,6 +54,7 @@ const float    SLOW_CAP_RPM   = 20;    // top motor speed while an axis has no t
 const float    STOP_TIME      = 0.5f;  // seconds to brake from top speed when coming up to a limit
 const uint32_t MANUAL_HOLD_MS = 3000;  // joystick beats face tracking for this long after you let go
 const uint32_t DEADMAN_MS     = 600;   // joystick page gone quiet -> stop
+const uint32_t VISCA_DEADMAN_MS = 3000; // OBS / tracker gone quiet while it had the head moving -> stop
 
 TMC2209Stepper drvTilt(&Serial2, R_SENSE, TILT_ADDR);
 TMC2209Stepper drvPan (&Serial2, R_SENSE, PAN_ADDR);
@@ -84,6 +85,7 @@ struct Axis {
   float v, a;                          // eased speed now (motor steps/s) and its rate of change
   bool  going;                         // driving to a preset
   long  saved;                         // last position written to flash
+  bool  trk;                           // the move in progress came from face tracking / OBS (uses the tracking ease)
 };
 Axis pan  = {"pan",  'p', nullptr, &drvPan,  false, false, 0, false, false, 0, 0, 0, 0, 0, 0, false, 0};
 Axis tilt = {"tilt", 't', nullptr, &drvTilt, false, false, 0, false, false, 0, 0, 0, 0, 0, 0, false, 0};
@@ -93,6 +95,12 @@ float maxRpm = 120;        // top motor speed (page slider)
 float ramp   = 1.0f;       // seconds for a speed change to ease in / out (page slider)
 bool  motorsOn = false;
 bool  trackingOn = true;   // false = ignore OBS / face tracking (joystick box button or the page)
+float trackScale = 0.2f;   // tracking speed scale: 1.0 = the speeds of a Sony PTZ camera, lower = finer and gentler (tune page)
+float trackRamp  = 0.5f;   // seconds for a tracking speed change to ease in / out (tune page)
+uint32_t viscaLastMs = 0;  // last pan/tilt command from OBS
+// Camera speed in degrees per second for each VISCA speed number, as the Face Tracker plugin assumes it (Sony table).
+const float SONY_PAN[25]  = {0, 0.875f, 1.55f, 2.075f, 2.4f, 2.6f, 2.8f, 3.0f, 3.2f, 3.45f, 3.875f, 4.7f, 6.375f, 9.75f, 14.5f, 19.5f, 25.25f, 31.75f, 38.25f, 46.5f, 59.0f, 74.0f, 89.0f, 104.5f, 120.0f};
+const float SONY_TILT[19] = {0, 0.875f, 1.55f, 2.075f, 3.225f, 4.75f, 6.175f, 8.0f, 10.0f, 12.25f, 15.0f, 18.5f, 23.5f, 30.5f, 39.0f, 48.5f, 58.75f, 69.25f, 80.0f};
 uint32_t lastWebMs = 0, manualUntil = 0, lastMoveMs = 0;
 const int NPRESET = 6;
 bool presetSet[NPRESET]; long presetPos[NPRESET][2];
@@ -108,6 +116,7 @@ String k(const Axis &x, const char *what) { String s; s += x.key; s += what; ret
 void loadAll() {
   prefs.begin("x70head", false);
   maxRpm = prefs.getFloat("max", 120); ramp = prefs.getFloat("ramp", 1.0f);
+  trackScale = prefs.getFloat("tsc", 0.2f); trackRamp = prefs.getFloat("tramp", 0.5f);
   wifiSsid = prefs.getString("ssid", ""); wifiPass = prefs.getString("wpass", ""); devPass = prefs.getString("dpass", DEFAULT_PASS);
   autoUpdate = prefs.getBool("auto", true);
   for (Axis *x : AX) {
@@ -212,12 +221,14 @@ void motionTick(float dt) {
   uint32_t now = millis();
   bool webAlive = now - lastWebMs < DEADMAN_MS;
   bool manual = (int32_t)(manualUntil - now) > 0;
+  if ((pan.viscaCmd != 0 || tilt.viscaCmd != 0) && now - viscaLastMs > VISCA_DEADMAN_MS) pan.viscaCmd = tilt.viscaCmd = 0;
   for (Axis *xp : AX) {
     Axis &x = *xp;
     if (!x.st) continue;
     if (!webAlive) x.webCmd = 0;
     float want = (manual || !trackingOn) ? x.webCmd : (x.webCmd != 0 ? x.webCmd : x.viscaCmd);
     if (!motorsOn) want = 0;
+    if (want != 0) x.trk = (x.webCmd == 0);                              // who started this move: tracking or the joystick
     if (x.going) {
       if (want != 0) { x.going = false; x.v = x.st->getCurrentSpeedInMilliHz() / 1000.0f; x.a = 0; }   // joystick takes over mid-move
       else { if (!x.st->isRunning()) { x.going = false; x.v = x.a = 0; } else lastMoveMs = now; continue; }
@@ -225,7 +236,7 @@ void motionTick(float dt) {
     float cap = capSps(x);
     float target = constrain(want * sgn(x), -cap, cap);                    // motor direction
     // critically damped follow: eases in and eases out, and copes with a target that keeps changing (face tracking)
-    float w = 4.74f / ramp;                                                // reaches 95 % of the new speed in 'ramp' seconds
+    float w = 4.74f / (x.trk ? trackRamp : ramp);                                                // reaches 95 % of the new speed in 'ramp' seconds
     float vBefore = x.v;
     float acc = w * w * (target - x.v) - 2.0f * w * x.a;
     x.a += acc * dt; x.v += x.a * dt;
@@ -258,6 +269,13 @@ float viscaSpeed(int s, int top) {             // speed 1..top -> steps/s, fine 
   float hi = maxSps(), lo = hi / 300.0f;
   return lo * powf(hi / lo, (float)(s - 1) / (float)(top - 1));
 }
+// VISCA speed number -> motor steps/s. With the gear ratio known the head moves at the Sony table speed times the
+// tracking scale, so tracker settings mean the same here as on a real PTZ camera. Without it, the old uncalibrated curve.
+float viscaSps(const Axis &x, int s, bool isTilt) {
+  if (x.gear <= 0) return viscaSpeed(s, isTilt ? 0x14 : 0x18);
+  float dps = (isTilt ? SONY_TILT[constrain(s, 1, 18)] : SONY_PAN[constrain(s, 1, 24)]) * trackScale;
+  return dps / 360.0f * x.gear * STEPS_PER_TURN;
+}
 int viscaPos(const Axis &x) {                  // Sony units: about 0.075 degree each
   if (!x.st) return 0;
   long p = (long)(x.st->getCurrentPosition() * sgn(x));
@@ -284,7 +302,8 @@ int viscaHandle(const uint8_t *p, int n, uint8_t *out) {
   }
   if (p[1] == 0x01) {                                                       // commands
     if (n >= 9 && p[2] == 0x06 && p[3] == 0x01) {                           // pan/tilt drive
-      float ps = viscaSpeed(p[4], 0x18), ts = viscaSpeed(p[5], 0x14);
+      float ps = viscaSps(pan, p[4], false), ts = viscaSps(tilt, p[5], true);
+      viscaLastMs = millis();
       pan.viscaCmd  = p[6] == 0x01 ? -ps : (p[6] == 0x02 ? ps : 0);         // 01 left, 02 right
       if (p[6] != 0x03 || p[7] != 0x03) lastInputMs = millis();
       tilt.viscaCmd = p[7] == 0x01 ? ts : (p[7] == 0x02 ? -ts : 0);         // 01 up, 02 down
@@ -427,6 +446,7 @@ details{margin-top:14px;text-align:left;background:#1b2027;border-radius:10px;pa
 <div id="pad"><div id="knob"></div></div>
 <button id="stop">STOP</button>
 <button id="trk" style="width:100%"></button>
+<button style="width:100%" onclick="location.href='/tune'">Tracking tune (head + OBS)</button>
 <h3>Presets (tap = go)</h3><div class="g" id="pr"></div>
 <button id="sv" style="width:100%">Save a preset: tap here, then a number</button>
 <label>Top speed <span id="mv"></span></label><input id="max" type="range" min="10" max="300" step="5">
@@ -479,18 +499,125 @@ setInterval(function(){if(busy)return;var mvg=act||X||Y;if(mvg||last){busy=true;
 else if(++idle>=10){idle=0;busy=true;q('/s').then(function(){busy=false})}},100);
 </script></body></html>)HTML";
 
+const char TUNE[] PROGMEM = R"HTML(<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>X70 tracking tune</title>
+<style>
+body{margin:0;background:#14171c;color:#e8ecf1;font:15px -apple-system,Segoe UI,Roboto,sans-serif}
+.w{max-width:440px;margin:auto;padding:12px}a{color:#4fc3f7}
+button{background:#2a313b;color:#e8ecf1;border:1px solid #3a4452;border-radius:10px;padding:12px 8px;font-size:15px;margin:3px 0;width:100%}
+button:active{background:#3a4452}.on{background:#1f5f3a}.sv{background:#8a6d1a}
+h3{margin:18px 0 4px;font-size:13px;color:#9aa5b4;text-transform:uppercase;letter-spacing:.08em}
+label{display:block;margin:12px 0 2px;font-size:13px;color:#cfd6df}label b{float:right;color:#e8ecf1}
+input[type=range]{width:100%}small{color:#9aa5b4;display:block}
+input[type=text],input[type=password],input[type=number],select{width:100%;box-sizing:border-box;background:#222830;color:#e8ecf1;border:1px solid #3a4452;border-radius:8px;padding:9px;font-size:16px;margin:2px 0 6px}
+.warn{color:#f2a93b;font-size:13px}#os{font-size:13px;color:#9aa5b4;margin:6px 0}
+</style></head><body><div class="w">
+<a href="/">&larr; Head controls</a>
+<h3>Head (changes apply at once)</h3>
+<div id="hw" class="warn"></div>
+<label>Tracking speed scale <b id="v_tsc"></b></label><input id="tsc" type="range" min="0.05" max="1" step="0.05">
+<small>Lower = finer, gentler tracking moves. The joystick is not affected.</small>
+<label>Tracking ease in / out <b id="v_tramp"></b></label><input id="tramp" type="range" min="0.2" max="2" step="0.1">
+<button id="trk"></button>
+<h3>OBS Face Tracker PTZ (live)</h3>
+<div id="cn">
+<small>In OBS: Tools &rarr; WebSocket Server Settings &rarr; enable, and copy the password. Stored only in this browser.</small>
+PC address<input id="ip" type="text" placeholder="192.168.1.50" autocapitalize="off" autocomplete="off">
+Port<input id="port" type="number" value="4455">
+Password<input id="pw" type="password" autocomplete="off">
+<button id="go">Connect to OBS</button></div>
+<div id="os">Not connected to OBS.</div>
+<div id="ob" hidden>
+<button id="en"></button>
+<h3>Start values</h3>
+<select id="shot"><option value="6">Waist-up shot</option><option value="11">Full-body shot</option><option value="25">Wide stage shot</option></select>
+<button id="rec">Load recommended start values</button>
+<h3>Fine tuning</h3><div id="sl"></div>
+<button id="ix"></button><button id="iy"></button>
+</div></div>
+<script>
+var $=function(i){return document.getElementById(i)},H={},ws=null,rid=0,cb={},SRC='',FLT='',FS={},FPS=30,tm={};
+var P=[['Kp_x_db','Pan speed',20,80,1,' dB'],['Kp_y_db','Tilt speed',20,80,1,' dB'],
+['e_deadband_x','Pan dead band (ignore small moves)',0,20,0.5,' %'],['e_nonlinear_x','Pan soft band',0,20,0.5,' %'],
+['e_deadband_y','Tilt dead band',0,20,0.5,' %'],['e_nonlinear_y','Tilt soft band',0,20,0.5,' %'],
+['track_x','Subject left / right in frame',-0.5,0.5,0.01,''],['track_y','Head room (higher = subject higher)',-0.5,0.5,0.01,''],
+['Ki_x','Pan follow-through',0,1,0.01,''],['Ki_y','Tilt follow-through',0,1,0.01,''],
+['Td_x','Pan quick start',0,1,0.01,' s'],['Td_y','Tilt quick start',0,1,0.01,' s'],
+['Tdlpf','Smoothing',0,10,0.1,' s'],['track_fps','Tracking rate (0 = every frame)',0,60,1,' fps']];
+function q(u){return fetch(u).then(function(r){return r.json()}).then(head).catch(function(){})}
+function head(s){H=s;var w='';if(!(s.gp>0)||!(s.gt>0))w='Gear ratios are not set on the head page, so tracking speeds are not calibrated. ';
+if(!s.trk)w+='Tracking is blocked on the head. ';$('hw').textContent=w;
+if(document.activeElement!=$('tsc'))$('tsc').value=s.tsc;$('v_tsc').textContent=(+s.tsc).toFixed(2)+' x';
+if(document.activeElement!=$('tramp'))$('tramp').value=s.tramp;$('v_tramp').textContent=(+s.tramp).toFixed(1)+' s';
+$('trk').textContent=s.trk?'Face tracking allowed (tap to block)':'Face tracking BLOCKED (tap to allow)';$('trk').className=s.trk?'on':'sv'}
+$('tsc').oninput=function(){$('v_tsc').textContent=(+this.value).toFixed(2)+' x'};$('tsc').onchange=function(){q('/set?tsc='+this.value)};
+$('tramp').oninput=function(){$('v_tramp').textContent=(+this.value).toFixed(1)+' s'};$('tramp').onchange=function(){q('/set?tramp='+this.value)};
+$('trk').onclick=function(){q('/trk')};
+setInterval(function(){q('/s')},1500);q('/s');
+// ---- SHA-256 (the page is plain http, so the browser's own crypto is not available) ----
+function sha(str){var m=new TextEncoder().encode(str),l=m.length,n=((l+8)>>6)+1,w=new Uint32Array(n*16),i,j;
+for(i=0;i<l;i++)w[i>>2]|=m[i]<<(24-(i%4)*8);w[l>>2]|=0x80<<(24-(l%4)*8);w[n*16-1]=l*8;w[n*16-2]=Math.floor(l/536870912);
+var K=[],h=[],c=2,x=0;function fr(v){return((v-Math.floor(v))*4294967296)|0}
+while(x<64){var pr=true;for(j=2;j*j<=c;j++)if(c%j==0){pr=false;break}if(pr){if(x<8)h[x]=fr(Math.sqrt(c));K[x++]=fr(Math.cbrt(c))}c++}
+var W=new Int32Array(64);function r(v,s){return(v>>>s)|(v<<(32-s))}
+for(i=0;i<n;i++){for(j=0;j<16;j++)W[j]=w[i*16+j];
+for(j=16;j<64;j++){var a=W[j-15],b=W[j-2];W[j]=(W[j-16]+(r(a,7)^r(a,18)^(a>>>3))+W[j-7]+(r(b,17)^r(b,19)^(b>>>10)))|0}
+var A=h[0],B=h[1],C=h[2],D=h[3],E=h[4],F=h[5],G=h[6],I=h[7];
+for(j=0;j<64;j++){var t1=(I+(r(E,6)^r(E,11)^r(E,25))+((E&F)^(~E&G))+K[j]+W[j])|0,t2=((r(A,2)^r(A,13)^r(A,22))+((A&B)^(A&C)^(B&C)))|0;
+I=G;G=F;F=E;E=(D+t1)|0;D=C;C=B;B=A;A=(t1+t2)|0}
+h[0]=(h[0]+A)|0;h[1]=(h[1]+B)|0;h[2]=(h[2]+C)|0;h[3]=(h[3]+D)|0;h[4]=(h[4]+E)|0;h[5]=(h[5]+F)|0;h[6]=(h[6]+G)|0;h[7]=(h[7]+I)|0}
+var o='';for(i=0;i<8;i++)for(j=3;j>=0;j--)o+=String.fromCharCode((h[i]>>>(j*8))&255);return btoa(o)}
+// ---- OBS WebSocket (protocol 5) ----
+function os(t){$('os').textContent=t}
+function req(t,d){return new Promise(function(ok,no){if(!ws||ws.readyState!=1){no('not connected');return}var id='r'+(++rid);cb[id]=[ok,no];
+ws.send(JSON.stringify({op:6,d:{requestType:t,requestId:id,requestData:d||{}}}))})}
+function connect(){var ip=$('ip').value.trim(),port=$('port').value||4455,pw=$('pw').value;if(!ip){os('Enter the PC address.');return}
+try{localStorage.setItem('x70obs',JSON.stringify({ip:ip,port:port,pw:pw}))}catch(e){}
+if(ws){ws.onclose=null;ws.close()}os('Connecting...');
+try{ws=new WebSocket('ws://'+ip+':'+port)}catch(e){os('Cannot open the connection: '+e.message);return}
+ws.onmessage=function(m){var j=JSON.parse(m.data);
+if(j.op==0){var a=j.d.authentication,id={rpcVersion:1,eventSubscriptions:0};if(a)id.authentication=sha(sha(pw+a.salt)+a.challenge);ws.send(JSON.stringify({op:1,d:id}))}
+else if(j.op==2){find()}
+else if(j.op==7){var c=cb[j.d.requestId];delete cb[j.d.requestId];if(c){if(j.d.requestStatus.result)c[0](j.d.responseData||{});else c[1](j.d.requestStatus.comment||('error '+j.d.requestStatus.code))}}};
+ws.onclose=function(e){$('ob').hidden=true;os(e.code==4009?'OBS rejected the password.':'Not connected to OBS'+(e.code&&e.code!=1000?' (code '+e.code+').':'.'))};
+ws.onerror=function(){os('Could not reach OBS at '+ip+':'+port+'. Is the WebSocket server enabled?')}}
+function find(){os('Connected. Looking for the Face Tracker PTZ filter...');
+req('GetVideoSettings').then(function(v){if(v.fpsDenominator)FPS=v.fpsNumerator/v.fpsDenominator;return req('GetInputList')}).then(function(l){
+var ins=l.inputs||[],i=0;function next(){if(i>=ins.length){os('Connected, but no source has a Face Tracker PTZ filter yet.');return}
+var nm=ins[i++].inputName;req('GetSourceFilterList',{sourceName:nm}).then(function(f){var fl=(f.filters||[]).filter(function(x){return x.filterKind=='face_tracker_ptz'})[0];
+if(!fl){next();return}SRC=nm;FLT=fl.filterName;
+req('GetSourceFilterDefaultSettings',{filterKind:'face_tracker_ptz'}).then(function(d){FS=Object.assign({},d.defaultFilterSettings||{},fl.filterSettings||{});FS._en=fl.filterEnabled;build()},function(){FS=Object.assign({},fl.filterSettings||{});FS._en=fl.filterEnabled;build()})},next)}
+next()}).catch(function(e){os('OBS error: '+e)})}
+function fmt(p,v){return(+v).toFixed(p[4]<0.1?2:(p[4]<1?1:0))+p[5]}
+function setv(k,v){FS[k]=v;clearTimeout(tm[k]);tm[k]=setTimeout(function(){var o={};o[k]=v;req('SetSourceFilterSettings',{sourceName:SRC,filterName:FLT,filterSettings:o,overlay:true}).catch(function(e){os('OBS error: '+e)})},120)}
+function build(){os('Connected: filter "'+FLT+'" on "'+SRC+'", OBS at '+FPS.toFixed(0)+' fps.');$('ob').hidden=false;var h='';
+P.forEach(function(p){h+='<label>'+p[1]+' <b id="v_'+p[0]+'"></b></label><input type="range" id="s_'+p[0]+'" min="'+p[2]+'" max="'+p[3]+'" step="'+p[4]+'">'});$('sl').innerHTML=h;
+P.forEach(function(p){var e=$('s_'+p[0]);e.oninput=function(){var v=+e.value;$('v_'+p[0]).textContent=fmt(p,v);setv(p[0],v)}});paint()}
+function paint(){P.forEach(function(p){var v=FS[p[0]];if(v===undefined)v=0;$('s_'+p[0]).value=v;$('v_'+p[0]).textContent=fmt(p,v)});
+$('en').textContent=FS._en?'Plugin tracking is ON (tap to switch off)':'Plugin tracking is OFF (tap to switch on)';$('en').className=FS._en?'on':'sv';
+$('ix').textContent='Reverse pan direction: '+(FS.invert_x?'ON':'off');$('iy').textContent='Reverse tilt direction: '+(FS.invert_y?'ON':'off')}
+$('en').onclick=function(){var v=!FS._en;req('SetSourceFilterEnabled',{sourceName:SRC,filterName:FLT,filterEnabled:v}).then(function(){FS._en=v;paint()},function(e){os('OBS error: '+e)})};
+$('ix').onclick=function(){setv('invert_x',!FS.invert_x);paint()};$('iy').onclick=function(){setv('invert_y',!FS.invert_y);paint()};
+// Start values: loop gain about 1 per second for the chosen shot width, the OBS frame rate and the head's speed scale.
+function rec(){var fov=+$('shot').value,s=+(H.tsc||0.2),kp=Math.round(20*Math.log10(fov*0.75*FPS/s));kp=Math.max(20,Math.min(80,kp));
+var v={Kp_x_db:kp,Kp_y_db:Math.max(20,kp-3),e_deadband_x:2,e_nonlinear_x:4,e_deadband_y:4,e_nonlinear_y:6,track_x:0,track_y:fov<8?0.2:0.3,Ki_x:0.2,Ki_y:0.2,Td_x:0.25,Td_y:0.25,Tdlpf:2,track_fps:12,e_deadband_z:50,Ki_z:0,Td_z:0,Kp_z_db:-40};
+Object.assign(FS,v);req('SetSourceFilterSettings',{sourceName:SRC,filterName:FLT,filterSettings:v,overlay:true}).then(function(){paint();os('Start values loaded (pan speed '+kp+' dB for '+FPS.toFixed(0)+' fps, scale '+s+').')},function(e){os('OBS error: '+e)})}
+$('rec').onclick=rec;$('go').onclick=connect;
+try{var sv=JSON.parse(localStorage.getItem('x70obs')||'null');if(sv){$('ip').value=sv.ip;$('port').value=sv.port;$('pw').value=sv.pw}}catch(e){}
+</script></body></html>)HTML";
+
 void sendStatus() {
   uint32_t now = millis();
   int src = 0;
   if (pan.webCmd != 0 || tilt.webCmd != 0) src = 1;
   else if ((pan.viscaCmd != 0 || tilt.viscaCmd != 0 || pan.going || tilt.going) && (int32_t)(manualUntil - now) <= 0) src = 2;
   long pp = pan.st ? (long)(pan.st->getCurrentPosition() * sgn(pan)) : 0, tp = tilt.st ? (long)(tilt.st->getCurrentPosition() * sgn(tilt)) : 0;
-  char b[620];
+  char b[700];
   snprintf(b, sizeof b,
     "{\"on\":%d,\"trk\":%d,\"src\":%d,\"pd\":%.2f,\"td\":%.2f,\"pt\":%.3f,\"tt\":%.3f,\"gp\":%.2f,\"gt\":%.2f,\"pl\":%d,\"tl\":%d,\"dp\":%d,\"dt\":%d,"
-    "\"max\":%d,\"ramp\":%.1f,\"rssi\":%d,\"ps\":[%d,%d,%d,%d,%d,%d],\"fw\":%d,\"auto\":%d,\"lat\":%d,\"jfw\":%d,\"jon\":%d,\"msg\":\"%s\"}",
+    "\"max\":%d,\"ramp\":%.1f,\"tsc\":%.2f,\"tramp\":%.1f,\"rssi\":%d,\"ps\":[%d,%d,%d,%d,%d,%d],\"fw\":%d,\"auto\":%d,\"lat\":%d,\"jfw\":%d,\"jon\":%d,\"msg\":\"%s\"}",
     motorsOn, trackingOn, src, stepsToDeg(pan, pp), stepsToDeg(tilt, tp), pp / STEPS_PER_TURN, tp / STEPS_PER_TURN, pan.gear, tilt.gear,
-    limited(pan), limited(tilt), pan.found, tilt.found, (int)maxRpm, ramp, (int)WiFi.RSSI(),
+    limited(pan), limited(tilt), pan.found, tilt.found, (int)maxRpm, ramp, trackScale, trackRamp, (int)WiFi.RSSI(),
     presetSet[0], presetSet[1], presetSet[2], presetSet[3], presetSet[4], presetSet[5],
     FW_BUILD, autoUpdate, latestBuild, joyBuild, (int)(joySeenMs != 0 && millis() - joySeenMs < 6000), fwMsg.c_str());
   web.send(200, "application/json", b);
@@ -499,6 +626,7 @@ void sendStatus() {
 void webSetup() {
   web.on("/", []() { web.send_P(200, "text/html", PAGE); });
   web.on("/s", sendStatus);
+  web.on("/tune", []() { web.send_P(200, "text/html", TUNE); });
   web.on("/j", []() {                                   // joystick: x, y from -1 to 1
     joyInput(web.arg("x").toFloat(), web.arg("y").toFloat());
     sendStatus();
@@ -508,6 +636,8 @@ void webSetup() {
   web.on("/en", []() { setMotors(web.arg("on") == "1"); sendStatus(); });
   web.on("/set", []() {
     if (web.hasArg("max"))  { maxRpm = constrain(web.arg("max").toFloat(), 10.0f, 300.0f); prefs.putFloat("max", maxRpm); }
+    if (web.hasArg("tsc"))   { trackScale = constrain(web.arg("tsc").toFloat(), 0.05f, 1.0f); prefs.putFloat("tsc", trackScale); }
+    if (web.hasArg("tramp")) { trackRamp = constrain(web.arg("tramp").toFloat(), 0.2f, 2.0f); prefs.putFloat("tramp", trackRamp); }
     if (web.hasArg("ramp")) { ramp = constrain(web.arg("ramp").toFloat(), 0.2f, 3.0f); prefs.putFloat("ramp", ramp); }
     if (web.hasArg("invp")) { pan.invert = !pan.invert; prefs.putBool("pinv", pan.invert); }
     if (web.hasArg("invt")) { tilt.invert = !tilt.invert; prefs.putBool("tinv", tilt.invert); }
