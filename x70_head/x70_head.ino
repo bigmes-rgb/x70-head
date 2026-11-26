@@ -148,6 +148,33 @@ void configure(TMC2209Stepper &d) {      // the settings proven with the test sk
   d.rms_current(RUN_MA, 0.5);
   d.GSTAT(0b111);
 }
+void setMotors(bool on);
+bool driversDown = false;                // true while a driver is not answering (no 12 V)
+unsigned long lastDrvCheck = 0;
+// Runs once a second while the head is still. Lets 12 V and USB be plugged in any order:
+// a driver that appears late, or that lost power and came back, is set up again automatically.
+void driverWatch() {
+  static uint8_t miss[2] = {0, 0};
+  bool changed = false; int i = 0;
+  for (Axis *x : AX) {
+    bool ok = x->drv->version() == 0x21;
+    if (ok) {
+      miss[i] = 0;
+      if (!x->found || (x->drv->GSTAT() & 1)) {
+        configure(*x->drv);
+        Serial.printf("%s driver: powered, set up again\n", x->name);
+        x->found = true; changed = true;
+      }
+    } else if (x->found && ++miss[i] >= 2) {
+      x->found = false; changed = true;
+      Serial.printf("%s driver: not answering (12 V off?)\n", x->name);
+    }
+    i++;
+  }
+  if (!changed) return;
+  if (pan.found && tilt.found) { if (driversDown) { driversDown = false; setMotors(true); Serial.println(F("Motors on.")); } }
+  else if (!driversDown) { driversDown = true; setMotors(false); }
+}
 void setMotors(bool on) {
   if (!on) for (Axis *x : AX) { if (x->st) x->st->forceStop(); x->v = x->a = 0; x->going = false; x->webCmd = x->viscaCmd = 0; }
   digitalWrite(EN_PIN, on ? LOW : HIGH);
@@ -561,7 +588,7 @@ void setup() {
 
   for (Axis *x : AX) {
     x->found = x->drv->version() == 0x21;
-    Serial.printf("%s driver: %s\n", x->name, x->found ? "found" : "NOT FOUND (12 V on before USB?)");
+    Serial.printf("%s driver: %s\n", x->name, x->found ? "found" : "waiting for 12 V");
     if (x->found) configure(*x->drv);
   }
   engine.init();
@@ -570,7 +597,7 @@ void setup() {
   if (pan.st)  { pan.st->setDirectionPin(PAN_DIR);   pan.st->setCurrentPosition(pan.saved); }
   if (tilt.st) { tilt.st->setDirectionPin(TILT_DIR); tilt.st->setCurrentPosition(tilt.saved); }
   if (!pan.st || !tilt.st) Serial.println(F("Step generator could not start - tell Claude."));
-  if (pan.found && tilt.found) setMotors(true); else Serial.println(F("Motors stay OFF: a driver is not answering."));
+  if (pan.found && tilt.found) setMotors(true); else { driversDown = true; Serial.println(F("Motors off until both drivers answer. Plug in 12 V; no restart needed.")); }
 
   WiFi.setHostname("x70head");
   bool joined = false;
@@ -610,6 +637,9 @@ void loop() {
   // (no joystick or OBS command and no movement for 5 minutes, or the first minutes after power-up).
   static uint32_t lastCheck = 0, lastJoyNudge = 0;
   bool online = WiFi.getMode() == WIFI_STA && WiFi.status() == WL_CONNECTED;
+  if (now - lastDrvCheck > 1000UL && !headMoving() && pan.viscaCmd == 0 && tilt.viscaCmd == 0 && pan.webCmd == 0 && tilt.webCmd == 0) {
+    lastDrvCheck = now; driverWatch();
+  }
   bool quiet = !headMoving() && pan.viscaCmd == 0 && tilt.viscaCmd == 0 && pan.webCmd == 0 && tilt.webCmd == 0 &&
                ((lastInputMs == 0 && lastMoveMs == 0) || (now - lastInputMs > 300000UL && now - lastMoveMs > 300000UL));
   if (online && quiet && now > 45000UL && (lastCheck == 0 || now - lastCheck > 600000UL)) {
