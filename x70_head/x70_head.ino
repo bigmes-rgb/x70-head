@@ -66,7 +66,7 @@ WiFiClient viscaClient;
 WiFiUDP    viscaUdp;
 WiFiUDP    joyUdp;                 // joystick box, port 52380
 Preferences prefs;
-String wifiSsid, wifiPass, devPass;      // stored in the device (Wi-Fi page)
+String wifiSsid, wifiPass, wifiSsid2, wifiPass2, devPass;      // stored in the device (Wi-Fi page)
 int  latestBuild = -1, joyBuild = -1;    // newest build on GitHub; build the joystick box reports
 uint32_t joySeenMs = 0;
 IPAddress joyIP;                         // where the joystick box was last heard from
@@ -117,7 +117,7 @@ void loadAll() {
   prefs.begin("x70head", false);
   maxRpm = prefs.getFloat("max", 120); ramp = prefs.getFloat("ramp", 1.0f);
   trackScale = prefs.getFloat("tsc", 0.2f); trackRamp = prefs.getFloat("tramp", 0.5f);
-  wifiSsid = prefs.getString("ssid", ""); wifiPass = prefs.getString("wpass", ""); devPass = prefs.getString("dpass", DEFAULT_PASS);
+  wifiSsid = prefs.getString("ssid", ""); wifiPass = prefs.getString("wpass", ""); wifiSsid2 = prefs.getString("ssid2", ""); wifiPass2 = prefs.getString("wpass2", ""); devPass = prefs.getString("dpass", DEFAULT_PASS);
   autoUpdate = prefs.getBool("auto", true);
   for (Axis *x : AX) {
     x->invert = prefs.getBool(k(*x, "inv").c_str(), false);
@@ -728,7 +728,9 @@ void webSetup() {
     String h = F("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><body style='font:16px sans-serif;max-width:420px;margin:auto;padding:16px'>"
                  "<h3>X70 head: Wi-Fi</h3><form method=post action=/wifisave>Wi-Fi name<br><input name=s style='width:100%;font-size:16px' value='");
     h += wifiSsid;
-    h += F("'><br><br>Wi-Fi password<br><input name=p type=password style='width:100%;font-size:16px'><br><br>"
+    h += F("'><br><br>Wi-Fi password (leave empty to keep)<br><input name=p type=password style='width:100%;font-size:16px'><br><br><b>Second network (optional)</b>, for example the church if the first is home. It joins whichever is in range.<br>Wi-Fi name 2<br><input name=s2 style='width:100%;font-size:16px' value='");
+    h += wifiSsid2;
+    h += F("'><br><br>Wi-Fi password 2 (leave empty to keep)<br><input name=p2 type=password style='width:100%;font-size:16px'><br><br>"
            "Device password (for the X70-Head Wi-Fi and manual updates; leave empty to keep)<br><input name=d style='width:100%;font-size:16px'><br><br>"
            "<button style='font-size:16px;padding:10px 20px'>Save and restart</button></form><p><a href='/'>Back</a> &middot; <a href='/update'>Upload a .bin by hand</a></p>");
     web.send(200, "text/html", h);
@@ -736,13 +738,36 @@ void webSetup() {
   web.on("/wifisave", HTTP_POST, []() {
     String s = web.arg("s"), p = web.arg("p"), d = web.arg("d");
     s.trim();
+    String s2 = web.arg("s2"), p2 = web.arg("p2"); s2.trim();
     if (s.length()) { prefs.putString("ssid", s); if (p.length() || s != wifiSsid) prefs.putString("wpass", p); }
+    if (web.hasArg("s2")) { prefs.putString("ssid2", s2); if (p2.length() || s2 != wifiSsid2) prefs.putString("wpass2", p2); }   // empty name = forget network 2
     if (d.length() >= 8) prefs.putString("dpass", d);
     web.send(200, "text/html", "<body style='font:16px sans-serif;padding:16px'>Saved. The head is restarting and will join that Wi-Fi. If it cannot, it brings back its own X70-Head Wi-Fi.");
     delay(800); setMotors(false); ESP.restart();
   });
   webUpdater.setup(&web, "/update", "admin", devPass.c_str());   // upload a .bin from any browser
   web.begin();
+}
+
+bool joinSavedWifi() {                         // two remembered networks: joins whichever is in range, the stronger one first
+  const String *ss[2] = {&wifiSsid, &wifiSsid2}, *pp[2] = {&wifiPass, &wifiPass2};
+  if (!wifiSsid.length() && !wifiSsid2.length()) return false;
+  WiFi.mode(WIFI_STA); WiFi.setSleep(false);
+  int rssi[2] = {-999, -999}, n = WiFi.scanNetworks();
+  for (int i = 0; i < n; i++) for (int j = 0; j < 2; j++) if (ss[j]->length() && WiFi.SSID(i) == *ss[j] && WiFi.RSSI(i) > rssi[j]) rssi[j] = WiFi.RSSI(i);
+  WiFi.scanDelete();
+  int first = rssi[1] > rssi[0] ? 1 : 0;
+  for (int t = 0; t < 2; t++) {
+    int j = t == 0 ? first : 1 - first;
+    if (!ss[j]->length()) continue;
+    Serial.printf("Joining Wi-Fi \"%s\"%s", ss[j]->c_str(), rssi[j] == -999 ? " (not seen, trying anyway)" : "");
+    WiFi.begin(ss[j]->c_str(), pp[j]->c_str());
+    for (int i = 0; i < (rssi[j] == -999 ? 16 : 40) && WiFi.status() != WL_CONNECTED; i++) { delay(500); Serial.print('.'); }
+    Serial.println();
+    if (WiFi.status() == WL_CONNECTED) return true;
+    WiFi.disconnect(true); delay(200); WiFi.mode(WIFI_STA);
+  }
+  return false;
 }
 
 // ---------------- start-up ----------------
@@ -768,14 +793,7 @@ void setup() {
   if (pan.found && tilt.found) setMotors(true); else { driversDown = true; Serial.println(F("Motors off until both drivers answer. Plug in 12 V; no restart needed.")); }
 
   WiFi.setHostname("x70head");
-  bool joined = false;
-  if (wifiSsid.length()) {
-    WiFi.mode(WIFI_STA); WiFi.setSleep(false);
-    WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
-    Serial.printf("Joining Wi-Fi \"%s\"", wifiSsid.c_str());
-    for (int i = 0; i < 40 && WiFi.status() != WL_CONNECTED; i++) { delay(500); Serial.print('.'); }
-    joined = WiFi.status() == WL_CONNECTED;
-  }
+  bool joined = joinSavedWifi();
   if (joined) {
     Serial.printf("\nConnected. Joystick page: http://%s   (or http://x70head.local)\n", WiFi.localIP().toString().c_str());
     Serial.printf("OBS: VISCA over TCP port 5678, or VISCA over IP (UDP) port 52381, address %s\n", WiFi.localIP().toString().c_str());

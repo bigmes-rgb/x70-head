@@ -52,7 +52,7 @@ const int MIN_SPAN = 250;    // smallest stick range believed before it has lear
 
 WiFiUDP udp;
 WiFiUDP cmdUdp;                          // the head tells the box to update on port 52379
-String wifiSsid, wifiPass, devPass;      // stored in the box (its own page)
+String wifiSsid, wifiPass, wifiSsid2, wifiPass2, devPass;      // stored in the box (its own page)
 bool apMode = false, updateRequested = false;
 bool swapAxes = true, flipLR = false, flipUD = false;   // stick direction settings (box page)
 bool trkInvert = false;                                 // false: CW/CCW button pressed in = face tracking allowed
@@ -113,6 +113,27 @@ bool pressed(Btn &b) {
   return true;
 }
 
+bool joinSavedWifi() {                         // two remembered networks: joins whichever is in range, the stronger one first
+  const String *ss[2] = {&wifiSsid, &wifiSsid2}, *pp[2] = {&wifiPass, &wifiPass2};
+  if (!wifiSsid.length() && !wifiSsid2.length()) return false;
+  WiFi.mode(WIFI_STA); WiFi.setSleep(false);
+  int rssi[2] = {-999, -999}, n = WiFi.scanNetworks();
+  for (int i = 0; i < n; i++) for (int j = 0; j < 2; j++) if (ss[j]->length() && WiFi.SSID(i) == *ss[j] && WiFi.RSSI(i) > rssi[j]) rssi[j] = WiFi.RSSI(i);
+  WiFi.scanDelete();
+  int first = rssi[1] > rssi[0] ? 1 : 0;
+  for (int t = 0; t < 2; t++) {
+    int j = t == 0 ? first : 1 - first;
+    if (!ss[j]->length()) continue;
+    Serial.printf("Joining Wi-Fi \"%s\"%s", ss[j]->c_str(), rssi[j] == -999 ? " (not seen, trying anyway)" : "");
+    WiFi.begin(ss[j]->c_str(), pp[j]->c_str());
+    for (int i = 0; i < (rssi[j] == -999 ? 16 : 40) && WiFi.status() != WL_CONNECTED; i++) { delay(500); Serial.print('.'); }
+    Serial.println();
+    if (WiFi.status() == WL_CONNECTED) return true;
+    WiFi.disconnect(true); delay(200); WiFi.mode(WIFI_STA);
+  }
+  return false;
+}
+
 void setup() {
   Serial.begin(115200);
   pinMode(PIN_LED, OUTPUT);
@@ -130,16 +151,12 @@ void setup() {
   Serial.printf("\n=== X70 joystick box ===\nCentre: top sensor %d, side sensor %d (expect roughly 1500 to 2600)\n", A.centre, B.centre);
   if (A.centre < 300 || A.centre > 3800 || B.centre < 300 || B.centre > 3800)
     Serial.println(F("A centre reading is far off: check that sensor's three wires (3V3 / signal / GND)."));
-  wifiSsid = prefs.getString("ssid", ""); wifiPass = prefs.getString("wpass", ""); devPass = prefs.getString("dpass", DEFAULT_PASS);
+  wifiSsid = prefs.getString("ssid", ""); wifiPass = prefs.getString("wpass", ""); wifiSsid2 = prefs.getString("ssid2", ""); wifiPass2 = prefs.getString("wpass2", ""); devPass = prefs.getString("dpass", DEFAULT_PASS);
   swapAxes = prefs.getBool("swap", true); flipLR = prefs.getBool("flx", false); flipUD = prefs.getBool("fly", false);
   trkInvert = prefs.getBool("trkinv", false);
   Serial.printf("Build %d\n", FW_BUILD);
   WiFi.setHostname("x70joystick");
-  if (wifiSsid.length()) {
-    WiFi.mode(WIFI_STA); WiFi.setSleep(false);
-    WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
-    for (int i = 0; i < 40 && WiFi.status() != WL_CONNECTED; i++) { delay(500); digitalWrite(PIN_LED, i % 2); }
-  }
+  joinSavedWifi();
   if (WiFi.status() != WL_CONNECTED) {
     apMode = true; WiFi.mode(WIFI_AP); WiFi.softAP(AP_NAME, devPass.c_str());
     Serial.printf("No Wi-Fi yet. Join the Wi-Fi \"%s\" (password %s), then open http://192.168.4.1\n", AP_NAME, devPass.c_str());
@@ -164,7 +181,9 @@ void setup() {
     if (headKnown()) { h += F("<a href='http://"); h += headIP.toString(); h += F("/'>"); h += headIP.toString(); h += F("</a>"); } else h += F("not found yet");
     h += F("</p><form method=post action=/wifisave>Wi-Fi name (same as the head)<br><input name=s style='width:100%;font-size:16px' value='");
     h += wifiSsid;
-    h += F("'><br><br>Wi-Fi password<br><input name=p type=password style='width:100%;font-size:16px'><br><br>"
+    h += F("'><br><br>Wi-Fi password (leave empty to keep)<br><input name=p type=password style='width:100%;font-size:16px'><br><br><b>Second network (optional)</b>, for example the church if the first is home. It joins whichever is in range.<br>Wi-Fi name 2<br><input name=s2 style='width:100%;font-size:16px' value='");
+    h += wifiSsid2;
+    h += F("'><br><br>Wi-Fi password 2 (leave empty to keep)<br><input name=p2 type=password style='width:100%;font-size:16px'><br><br>"
            "Device password (leave empty to keep)<br><input name=d style='width:100%;font-size:16px'><br><br>"
            "<button style='font-size:16px;padding:10px 20px'>Save and restart</button></form>"
            "<p><a href='/fwgo'>Update this box from GitHub</a> &middot; <a href='/update'>Upload a .bin by hand</a></p>");
@@ -181,7 +200,9 @@ void setup() {
   web.on("/wifisave", HTTP_POST, []() {
     String s = web.arg("s"), p = web.arg("p"), d = web.arg("d");
     s.trim();
+    String s2 = web.arg("s2"), p2 = web.arg("p2"); s2.trim();
     if (s.length()) { prefs.putString("ssid", s); if (p.length() || s != wifiSsid) prefs.putString("wpass", p); }
+    if (web.hasArg("s2")) { prefs.putString("ssid2", s2); if (p2.length() || s2 != wifiSsid2) prefs.putString("wpass2", p2); }   // empty name = forget network 2
     if (d.length() >= 8) prefs.putString("dpass", d);
     web.send(200, "text/html", "<body style='font:16px sans-serif;padding:16px'>Saved. The box is restarting and will join that Wi-Fi. If it cannot, it brings back its own X70-Joystick Wi-Fi.");
     delay(800); ESP.restart();
