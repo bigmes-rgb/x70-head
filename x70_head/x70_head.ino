@@ -450,7 +450,7 @@ details{margin-top:14px;text-align:left;background:#1b2027;border-radius:10px;pa
 <div id="pad"><div id="knob"></div></div>
 <button id="stop">STOP</button>
 <button id="trk" style="width:100%"></button>
-<button style="width:100%" onclick="location.href='/tune'">Tracking tune (head + OBS)</button>
+<button style="width:100%" onclick="location.href='/tune'">Adjust face tracking (speed, smoothness)</button>
 <h3>Presets (tap = go)</h3><div class="g" id="pr"></div>
 <button id="sv" style="width:100%">Save a preset: tap here, then a number</button>
 <label>Top speed <span id="mv"></span></label><input id="max" type="range" min="10" max="300" step="5">
@@ -504,7 +504,7 @@ else if(++idle>=10){idle=0;busy=true;q('/s').then(function(){busy=false})}},100)
 </script></body></html>)HTML";
 
 const char TUNE[] PROGMEM = R"HTML(<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>X70 tracking tune</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>X70: adjust face tracking</title>
 <style>
 body{margin:0;background:#14171c;color:#e8ecf1;font:15px -apple-system,Segoe UI,Roboto,sans-serif}
 .w{max-width:440px;margin:auto;padding:12px}a{color:#4fc3f7}
@@ -628,9 +628,9 @@ void sendStatus() {
 }
 
 void webSetup() {
-  web.on("/", []() { web.send_P(200, "text/html", PAGE); });
+  web.on("/", []() { web.sendHeader("Cache-Control", "no-store"); web.send_P(200, "text/html", PAGE); });   // never show an old copy after an update
   web.on("/s", sendStatus);
-  web.on("/tune", []() { web.send_P(200, "text/html", TUNE); });
+  web.on("/tune", []() { web.sendHeader("Cache-Control", "no-store"); web.send_P(200, "text/html", TUNE); });
   web.on("/j", []() {                                   // joystick: x, y from -1 to 1
     joyInput(web.arg("x").toFloat(), web.arg("y").toFloat());
     sendStatus();
