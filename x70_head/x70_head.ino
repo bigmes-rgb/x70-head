@@ -481,7 +481,7 @@ pad.onpointerdown=function(e){act=true;pad.setPointerCapture(e.pointerId);mv(e)}
 pad.onpointermove=function(e){if(act)mv(e)};
 pad.onpointerup=pad.onpointercancel=function(){act=false;X=Y=0;setK()};
 function show(s){S=s;var t=(s.gp>0?'Pan '+s.pd.toFixed(1)+'°':'Pan '+s.pt.toFixed(2)+' motor turns')+'   '+(s.gt>0?'Tilt '+s.td.toFixed(1)+'°':'Tilt '+s.tt.toFixed(2)+' motor turns');
-t+='\n'+(s.on?(s.src==2?'Face tracking / OBS driving':s.src==1?'Joystick':'Holding'):'MOTORS OFF')+'   Wi-Fi '+s.rssi+' dBm';t+='\nHead '+s.ip+'   Joystick '+(s.jip||'not seen');$('st').textContent=t;
+t+='\n'+(s.src==2?'OBS face tracking is sending commands':s.src==1?'Joystick':(s.on?'Holding':'No commands'))+(s.on?'':' (MOTORS OFF)')+'   Wi-Fi '+s.rssi+' dBm';t+='\nHead '+s.ip+'   Joystick '+(s.jip||'not seen');$('st').textContent=t;
 var w='';if(!s.dp)w+='Pan driver not answering. ';if(!s.dt)w+='Tilt driver not answering. ';if(!s.pl)w+='Pan limits not set (slow). ';if(!s.tl)w+='Tilt limits not set (slow). ';$('warn').textContent=w;
 if(document.activeElement!=$('max')){$('max').value=s.max}$('mv').textContent=s.max+' RPM motor';
 if(document.activeElement!=$('ramp')){$('ramp').value=s.ramp}$('rv').textContent=s.ramp.toFixed(1)+' s';
