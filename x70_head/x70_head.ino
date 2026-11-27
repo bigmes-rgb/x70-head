@@ -404,6 +404,7 @@ void joyInput(float x, float y) {                       // x, y from -1 to 1
 void recallPreset(int n) {
   if (n >= 0 && n < NPRESET && presetSet[n]) { manualUntil = millis() + MANUAL_HOLD_MS; pan.viscaCmd = tilt.viscaCmd = 0; gotoPos(presetPos[n][0], presetPos[n][1]); }
 }
+void setTracking(bool on) { trackingOn = on; if (!on) pan.viscaCmd = tilt.viscaCmd = 0; }
 // Joystick box packets (text, UDP 52380):  "J,x,y"  stick   |  "B,id,P,n"  recall preset n   |  "B,id,T"  tracking on/off
 void joyBoxPoll() {
   static long lastId = -1;
@@ -414,12 +415,15 @@ void joyBoxPoll() {
     float x, y; long id; int k;
     joyIP = joyUdp.remoteIP();
     if (sscanf(b, "J,%f,%f", &x, &y) == 2) { joyInput(x, y); joySeenMs = millis(); }
-    else if (sscanf(b, "H,%d", &k) == 1) {                                           // joystick box heartbeat with its build number
+    else if (sscanf(b, "H,%d", &k) == 1) {                                           // joystick box heartbeat: build number, tracking switch
       joyBuild = k; joySeenMs = millis();
+      int sw = -1; static int lastSw = -1;
+      if (sscanf(b, "H,%*d,%d", &sw) == 1 && sw != lastSw) { lastSw = sw; setTracking(sw != 0); }   // follow the switch when it changes (also after a restart)
       char a[16]; snprintf(a, sizeof a, "A,%d", FW_BUILD); sendText(joyIP, a, 52379);  // answer, so the box learns the head's address
     }
     else if (sscanf(b, "B,%ld,P,%d", &id, &k) == 2) { if (id != lastId) { lastId = id; recallPreset(k); } }
-    else if (sscanf(b, "B,%ld,T", &id) == 1 && strchr(b, 'T')) { if (id != lastId) { lastId = id; trackingOn = !trackingOn; if (!trackingOn) pan.viscaCmd = tilt.viscaCmd = 0; } }
+    else if (sscanf(b, "B,%ld,T,%d", &id, &k) == 2) { if (id != lastId) { lastId = id; setTracking(k != 0); } }          // tracking switch position
+    else if (sscanf(b, "B,%ld,T", &id) == 1 && strchr(b, 'T')) { if (id != lastId) { lastId = id; setTracking(!trackingOn); } }   // older boxes: toggle
   }
 }
 
@@ -435,7 +439,7 @@ button{background:#2a313b;color:#e8ecf1;border:1px solid #3a4452;border-radius:1
 button:active{background:#3a4452}.g{display:grid;grid-template-columns:repeat(3,1fr)}.g2{display:grid;grid-template-columns:repeat(2,1fr)}
 #stop{background:#b3261e;border-color:#b3261e;font-weight:700;width:100%;padding:14px}
 .on{background:#1f5f3a}.sv{background:#8a6d1a}
-#st{font-size:13px;color:#9aa5b4;min-height:38px;white-space:pre-line}
+#st{font-size:13px;color:#9aa5b4;min-height:54px;white-space:pre-line}
 h3{margin:16px 0 4px;font-size:13px;color:#9aa5b4;text-transform:uppercase;letter-spacing:.08em}
 label{display:block;margin:10px 0 2px;font-size:13px;color:#cfd6df}input[type=range]{width:100%}
 input[type=number]{width:80px;background:#222830;color:#e8ecf1;border:1px solid #3a4452;border-radius:8px;padding:8px;font-size:15px}
@@ -477,7 +481,7 @@ pad.onpointerdown=function(e){act=true;pad.setPointerCapture(e.pointerId);mv(e)}
 pad.onpointermove=function(e){if(act)mv(e)};
 pad.onpointerup=pad.onpointercancel=function(){act=false;X=Y=0;setK()};
 function show(s){S=s;var t=(s.gp>0?'Pan '+s.pd.toFixed(1)+'°':'Pan '+s.pt.toFixed(2)+' motor turns')+'   '+(s.gt>0?'Tilt '+s.td.toFixed(1)+'°':'Tilt '+s.tt.toFixed(2)+' motor turns');
-t+='\n'+(s.on?(s.src==2?'Face tracking / OBS driving':s.src==1?'Joystick':'Holding'):'MOTORS OFF')+'   Wi-Fi '+s.rssi+' dBm';$('st').textContent=t;
+t+='\n'+(s.on?(s.src==2?'Face tracking / OBS driving':s.src==1?'Joystick':'Holding'):'MOTORS OFF')+'   Wi-Fi '+s.rssi+' dBm';t+='\nHead '+s.ip+'   Joystick '+(s.jip||'not seen');$('st').textContent=t;
 var w='';if(!s.dp)w+='Pan driver not answering. ';if(!s.dt)w+='Tilt driver not answering. ';if(!s.pl)w+='Pan limits not set (slow). ';if(!s.tl)w+='Tilt limits not set (slow). ';$('warn').textContent=w;
 if(document.activeElement!=$('max')){$('max').value=s.max}$('mv').textContent=s.max+' RPM motor';
 if(document.activeElement!=$('ramp')){$('ramp').value=s.ramp}$('rv').textContent=s.ramp.toFixed(1)+' s';
@@ -487,7 +491,7 @@ $('mo').textContent=s.on?'Switch motors OFF (camera may sag)':'Switch motors ON'
 for(var i=0;i<6;i++){$('p'+i).className=s.ps[i]?'on':''}
 $('au').textContent=s.auto?'Automatic updates: ON (tap to turn off)':'Automatic updates: OFF (tap to turn on)';$('au').className=s.auto?'on':'';
 if(s.lat>s.fw&&s.fw>0)w+='Update available: build '+s.lat+'. ';$('warn').textContent=w;
-$('fw').textContent='Head: build '+s.fw+'\nJoystick box: '+(s.jon?'build '+s.jfw:'not seen')+'\nNewest on GitHub: '+(s.lat<0?'not checked yet':'build '+s.lat)+(s.msg?'\n'+s.msg:'')}
+$('fw').textContent='Head: build '+s.fw+' at '+s.ip+'\nJoystick box: '+(s.jon?'build '+s.jfw+' at '+s.jip:'not seen')+'\nNewest on GitHub: '+(s.lat<0?'not checked yet':'build '+s.lat)+(s.msg?'\n'+s.msg:'')}
 function q(u){return fetch(u).then(function(r){return r.json()}).then(show).catch(function(){$('st').textContent='no connection to the head'})}
 function lim(a,e){q('/lim?a='+a+'&e='+e)}
 for(var i=0;i<6;i++){var b=document.createElement('button');b.id='p'+i;b.textContent=i+1;b.onclick=(function(n){return function(){q('/p?n='+n+(saving?'&save=1':''));saving=false;$('sv').className=''}})(i);$('pr').appendChild(b)}
@@ -514,7 +518,7 @@ input[type=text],input[type=password],input[type=number],select{width:100%;box-s
 </style></head><body><div class="w">
 <a href="/">&larr; Head controls</a>
 <h3>Head (changes apply at once)</h3>
-<div id="hw" class="warn"></div>
+<small id="adr"></small><div id="hw" class="warn"></div>
 <label>Tracking speed scale <b id="v_tsc"></b></label><input id="tsc" type="range" min="0.05" max="1" step="0.05">
 <small>Lower = finer, gentler tracking moves. The joystick is not affected.</small>
 <label>Tracking ease in / out <b id="v_tramp"></b></label><input id="tramp" type="range" min="0.2" max="2" step="0.1">
@@ -546,7 +550,7 @@ var P=[['Kp_x_db','Pan speed',20,80,1,' dB'],['Kp_y_db','Tilt speed',20,80,1,' d
 ['Tdlpf','Smoothing',0,10,0.1,' s'],['track_fps','Tracking rate (0 = every frame)',0,60,1,' fps']];
 function q(u){return fetch(u).then(function(r){return r.json()}).then(head).catch(function(){})}
 function head(s){H=s;var w='';if(!(s.gp>0)||!(s.gt>0))w='Gear ratios are not set on the head page, so tracking speeds are not calibrated. ';
-if(!s.trk)w+='Tracking is blocked on the head. ';$('hw').textContent=w;
+if(!s.trk)w+='Tracking is blocked on the head. ';$('hw').textContent=w;$('adr').textContent='Head '+s.ip+' (use this and port 5678 in the OBS filter)   Joystick '+(s.jip||'not seen');
 if(document.activeElement!=$('tsc'))$('tsc').value=s.tsc;$('v_tsc').textContent=(+s.tsc).toFixed(2)+' x';
 if(document.activeElement!=$('tramp'))$('tramp').value=s.tramp;$('v_tramp').textContent=(+s.tramp).toFixed(1)+' s';
 $('trk').textContent=s.trk?'Face tracking allowed (tap to block)':'Face tracking BLOCKED (tap to allow)';$('trk').className=s.trk?'on':'sv'}
@@ -612,14 +616,14 @@ void sendStatus() {
   if (pan.webCmd != 0 || tilt.webCmd != 0) src = 1;
   else if ((pan.viscaCmd != 0 || tilt.viscaCmd != 0 || pan.going || tilt.going) && (int32_t)(manualUntil - now) <= 0) src = 2;
   long pp = pan.st ? (long)(pan.st->getCurrentPosition() * sgn(pan)) : 0, tp = tilt.st ? (long)(tilt.st->getCurrentPosition() * sgn(tilt)) : 0;
-  char b[700];
+  char b[820]; String ipS = WiFi.localIP().toString(), jipS = (joySeenMs != 0 && millis() - joySeenMs < 6000) ? joyIP.toString() : String("");
   snprintf(b, sizeof b,
     "{\"on\":%d,\"trk\":%d,\"src\":%d,\"pd\":%.2f,\"td\":%.2f,\"pt\":%.3f,\"tt\":%.3f,\"gp\":%.2f,\"gt\":%.2f,\"pl\":%d,\"tl\":%d,\"dp\":%d,\"dt\":%d,"
-    "\"max\":%d,\"ramp\":%.1f,\"tsc\":%.2f,\"tramp\":%.1f,\"rssi\":%d,\"ps\":[%d,%d,%d,%d,%d,%d],\"fw\":%d,\"auto\":%d,\"lat\":%d,\"jfw\":%d,\"jon\":%d,\"msg\":\"%s\"}",
+    "\"max\":%d,\"ramp\":%.1f,\"tsc\":%.2f,\"tramp\":%.1f,\"rssi\":%d,\"ps\":[%d,%d,%d,%d,%d,%d],\"fw\":%d,\"auto\":%d,\"lat\":%d,\"jfw\":%d,\"jon\":%d,\"ip\":\"%s\",\"jip\":\"%s\",\"msg\":\"%s\"}",
     motorsOn, trackingOn, src, stepsToDeg(pan, pp), stepsToDeg(tilt, tp), pp / STEPS_PER_TURN, tp / STEPS_PER_TURN, pan.gear, tilt.gear,
     limited(pan), limited(tilt), pan.found, tilt.found, (int)maxRpm, ramp, trackScale, trackRamp, (int)WiFi.RSSI(),
     presetSet[0], presetSet[1], presetSet[2], presetSet[3], presetSet[4], presetSet[5],
-    FW_BUILD, autoUpdate, latestBuild, joyBuild, (int)(joySeenMs != 0 && millis() - joySeenMs < 6000), fwMsg.c_str());
+    FW_BUILD, autoUpdate, latestBuild, joyBuild, (int)(joySeenMs != 0 && millis() - joySeenMs < 6000), ipS.c_str(), jipS.c_str(), fwMsg.c_str());
   web.send(200, "application/json", b);
 }
 

@@ -55,6 +55,8 @@ WiFiUDP cmdUdp;                          // the head tells the box to update on 
 String wifiSsid, wifiPass, devPass;      // stored in the box (its own page)
 bool apMode = false, updateRequested = false;
 bool swapAxes = true, flipLR = false, flipUD = false;   // stick direction settings (box page)
+bool trkInvert = false;                                 // false: CW/CCW button pressed in = face tracking allowed
+bool trkWanted = true; uint32_t trkEdgeMs = 0;
 IPAddress headIP;                        // learned from the head's answers, or looked up by name
 uint32_t headAckMs = 0;                  // last time the head answered
 int headBuild = -1;
@@ -123,12 +125,14 @@ void setup() {
   long ca = 0, cb = 0; for (int i = 0; i < 20; i++) { ca += readAvg(PIN_A); cb += readAvg(PIN_B); delay(20); }
   A.centre = ca / 20; B.centre = cb / 20;
   b1.last = digitalRead(PIN_BTN1) == LOW; b2.last = digitalRead(PIN_BTN2) == LOW;
+  trkWanted = b2.last != trkInvert;
   evtId = esp_random() & 0xFFFFF;
   Serial.printf("\n=== X70 joystick box ===\nCentre: top sensor %d, side sensor %d (expect roughly 1500 to 2600)\n", A.centre, B.centre);
   if (A.centre < 300 || A.centre > 3800 || B.centre < 300 || B.centre > 3800)
     Serial.println(F("A centre reading is far off: check that sensor's three wires (3V3 / signal / GND)."));
   wifiSsid = prefs.getString("ssid", ""); wifiPass = prefs.getString("wpass", ""); devPass = prefs.getString("dpass", DEFAULT_PASS);
   swapAxes = prefs.getBool("swap", true); flipLR = prefs.getBool("flx", false); flipUD = prefs.getBool("fly", false);
+  trkInvert = prefs.getBool("trkinv", false);
   Serial.printf("Build %d\n", FW_BUILD);
   WiFi.setHostname("x70joystick");
   if (wifiSsid.length()) {
@@ -151,6 +155,13 @@ void setup() {
     if (fwMsg.length()) { h += "<br>"; h += fwMsg; }
     h += F("</p><p><b>Stick directions</b> (tap to change, works straight away)<br>"
            "<a href='/dir?k=swap'>Swap left/right with up/down</a><br><a href='/dir?k=flx'>Reverse left/right</a><br><a href='/dir?k=fly'>Reverse up/down</a>");
+    h += F("</p><p><b>Face tracking button (CW/CCW)</b><br>Now: tracking ");
+    h += trkWanted ? F("allowed") : F("blocked");
+    h += F("<br><a href='/dir?k=trk'>Reverse this button</a>");
+    h += F("</p><p><b>Addresses</b><br>This box: ");
+    h += apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+    h += F("<br>Head: ");
+    if (headKnown()) { h += F("<a href='http://"); h += headIP.toString(); h += F("/'>"); h += headIP.toString(); h += F("</a>"); } else h += F("not found yet");
     h += F("</p><form method=post action=/wifisave>Wi-Fi name (same as the head)<br><input name=s style='width:100%;font-size:16px' value='");
     h += wifiSsid;
     h += F("'><br><br>Wi-Fi password<br><input name=p type=password style='width:100%;font-size:16px'><br><br>"
@@ -164,6 +175,7 @@ void setup() {
     if (k == "swap") { swapAxes = !swapAxes; prefs.putBool("swap", swapAxes); }
     if (k == "flx")  { flipLR = !flipLR; prefs.putBool("flx", flipLR); }
     if (k == "fly")  { flipUD = !flipUD; prefs.putBool("fly", flipUD); }
+    if (k == "trk")  { trkInvert = !trkInvert; prefs.putBool("trkinv", trkInvert); trkWanted = b2.last != trkInvert; sendEvent(trkWanted ? "T,1" : "T,0"); }
     web.sendHeader("Location", "/"); web.send(302, "text/plain", "");
   });
   web.on("/wifisave", HTTP_POST, []() {
@@ -197,7 +209,7 @@ void loop() {
   bool wifi = !apMode && WiFi.status() == WL_CONNECTED;
   digitalWrite(PIN_LED, wifi ? HIGH : (now / (apMode ? 120 : 300)) % 2);   // slow blink = looking for Wi-Fi, fast blink = setup mode
   if (!apMode && !wifi && now - lastTry > 8000) { lastTry = now; WiFi.reconnect(); }
-  if (wifi && now - lastBeat > 2000) { lastBeat = now; char m[24]; snprintf(m, sizeof m, "H,%d", FW_BUILD); sendToHead(m); }   // "I'm here, build N"
+  if (wifi && now - lastBeat > 2000) { lastBeat = now; char m[24]; snprintf(m, sizeof m, "H,%d,%d", FW_BUILD, trkWanted ? 1 : 0); sendToHead(m); }   // "I'm here, build N, tracking switch"
   if (cmdUdp.parsePacket() > 0) {
     char b[16]; int n = cmdUdp.read((uint8_t *)b, sizeof b - 1); b[n > 0 ? n : 0] = 0;
     if (b[0] == 'U') updateRequested = true;
@@ -230,9 +242,14 @@ void loop() {
   }
   if (spanDirty && now - spanDirtyMs > 3000) { spanDirty = false; saveSpan(A); saveSpan(B); }   // remember the learned range
 
-  bool p1 = pressed(b1), p2 = pressed(b2);
+  bool p1 = pressed(b1);
   if (wifi && p1) sendEvent("P,0");                               // POWER button: go to preset 1
-  if (wifi && p2) sendEvent("T");                                 // CW/CCW button: face tracking allowed / blocked
+  // CW/CCW button is a switch: pressed in = face tracking allowed, out = blocked (reversible on the box page)
+  bool in2 = digitalRead(PIN_BTN2) == LOW;
+  if (in2 != b2.last && now - trkEdgeMs > 60) {
+    b2.last = in2; trkEdgeMs = now; trkWanted = in2 != trkInvert;
+    if (wifi) sendEvent(trkWanted ? "T,1" : "T,0");
+  }
   bool both = digitalRead(PIN_BTN1) == LOW && digitalRead(PIN_BTN2) == LOW;
   if (!both) bothSince = now;
   else if (now - bothSince > 5000) {                              // both held 5 s: forget the learned range
