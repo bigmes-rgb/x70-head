@@ -71,6 +71,8 @@ int  latestBuild = -1, joyBuild = -1;    // newest build on GitHub; build the jo
 uint32_t joySeenMs = 0;
 IPAddress joyIP;                         // where the joystick box was last heard from
 bool updateRequested = false;
+bool updMode = false;                     // started only to install an update: nothing else runs
+volatile int updStage = 0, updPct = 0, updTry = 0;   // 1 connecting, 2 downloading, 3 installed, 4 failed
 bool autoUpdate = true;                   // check GitHub by itself and install new builds while the head is idle
 uint32_t lastInputMs = 0;                // last joystick / OBS command
 String fwMsg = "";
@@ -381,21 +383,34 @@ void broadcastText(const char *msg, int port) {
   IPAddress ip = WiFi.getMode() == WIFI_AP ? WiFi.softAPIP() : WiFi.localIP(), bc = ip; bc[3] = 255;
   WiFiUDP u; u.beginPacket(bc, port); u.write((const uint8_t *)msg, strlen(msg)); u.endPacket();
 }
-void selfUpdate() {                            // downloads and installs the newest head firmware, then restarts
-  if (pan.found && tilt.found) setMotors(true);   // keep holding the camera while it downloads
-  viscaClient.stop(); pan.viscaCmd = tilt.viscaCmd = 0;   // free the tracker's connection: the download needs the memory
+// Updates install in a clean restart: the head comes back up with only Wi-Fi and its page running,
+// so the download has the whole memory and network to itself, and the page can show live progress.
+void requestUpdateRestart() {
+  for (Axis *x : AX) if (x->st) { long p = x->st->getCurrentPosition(); if (p != x->saved) { x->saved = p; prefs.putLong(k(*x, "pos").c_str(), p); } }
+  prefs.putBool("upd", true);
+  delay(400);
+  ESP.restart();
+}
+void updateTask(void *) {
+  delay(1500);
   httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  httpUpdate.rebootOnUpdate(true);
-  for (int attempt = 1; attempt <= 3; attempt++) {         // a dropped download is retried by itself
+  httpUpdate.rebootOnUpdate(false);
+  httpUpdate.onProgress([](int cur, int total) { updStage = 2; updPct = total > 0 ? (int)(100LL * cur / total) : 0; });
+  String err;
+  for (int attempt = 1; attempt <= 3; attempt++) {
+    updTry = attempt; updStage = 1; updPct = 0;
     WiFiClientSecure c; c.setInsecure();
     t_httpUpdate_return r = httpUpdate.update(c, String(FW_BASE) + FW_FILE);
-    if (r != HTTP_UPDATE_FAILED) return;
-    fwMsg = "Update failed (" + String(attempt) + " of 3 tries): " + httpUpdate.getLastErrorString();
-    Serial.println(fwMsg);
-    delay(1500);
+    if (r == HTTP_UPDATE_OK) { updPct = 100; updStage = 3; delay(2500); ESP.restart(); }
+    err = httpUpdate.getLastErrorString();
+    Serial.printf("Update try %d failed: %s\n", attempt, err.c_str());
+    delay(2000);
   }
+  updStage = 4;
+  prefs.putString("updmsg", "Update failed after 3 tries: " + err + " (free memory " + String(ESP.getFreeHeap() / 1024) + " KB)");
+  delay(4000);
+  ESP.restart();                                 // back to normal running on the build it already has
 }
-
 void tellJoystick(const char *msg) {          // straight to the box if its address is known, and to everyone as a fallback
   if (joyIP[0] != 0) sendText(joyIP, msg, 52379);
   broadcastText(msg, 52379);
@@ -452,7 +467,22 @@ label{display:block;margin:10px 0 2px;font-size:13px;color:#cfd6df}input[type=ra
 input[type=number]{width:80px;background:#222830;color:#e8ecf1;border:1px solid #3a4452;border-radius:8px;padding:8px;font-size:15px}
 details{margin-top:14px;text-align:left;background:#1b2027;border-radius:10px;padding:8px 12px}summary{padding:6px 0}
 #warn{color:#f2a93b;font-size:13px}
-</style></head><body><div class="w">
+#up{position:fixed;inset:0;background:rgba(10,12,15,.93);display:flex;align-items:center;justify-content:center;z-index:9}#up[hidden]{display:none}
+.uc{width:min(88vw,360px);background:#1b2027;border:1px solid #3a4452;border-radius:16px;padding:20px 20px 14px;text-align:left}
+.uc h2{margin:0 0 10px;font-size:18px}.us{display:flex;align-items:center;gap:10px;padding:7px 0;color:#6b7686;flex-wrap:wrap}
+.us i{width:18px;height:18px;border-radius:50%;border:2px solid #3a4452;flex:none;box-sizing:border-box}
+.us.now{color:#e8ecf1}.us.now i{border-color:#4fc3f7;border-top-color:transparent;animation:sp .8s linear infinite}
+.us.ok{color:#9fdcb5}.us.ok i{background:#2e9d5b;border-color:#2e9d5b}.us.bad{color:#ff8a80}.us.bad i{background:#b3261e;border-color:#b3261e}
+.bar{flex-basis:100%;height:8px;background:#2a313b;border-radius:4px;overflow:hidden;margin-left:28px}.bar b{display:block;height:100%;width:0;background:#4fc3f7;transition:width .4s}
+#um{font-size:13px;color:#9aa5b4;min-height:34px;margin:10px 0 6px}@keyframes sp{to{transform:rotate(360deg)}}
+</style></head><body><div id="up" hidden><div class="uc"><h2 id="ut"></h2>
+<div class="us" id="u1"><i></i>Restarting into update mode</div>
+<div class="us" id="u2"><i></i>Connecting to GitHub</div>
+<div class="us" id="u3"><i></i><span>Downloading <span id="upc"></span></span><div class="bar"><b id="ub"></b></div></div>
+<div class="us" id="u4"><i></i>Installing and restarting</div>
+<div class="us" id="u5"><i></i><span id="u5t">Head running the new build</span></div>
+<div class="us" id="u6"><i></i><span id="uj">Joystick box</span></div>
+<p id="um"></p><button id="ux" style="width:100%" hidden>Close</button></div></div><div class="w">
 <div id="st">connecting...</div><div id="warn"></div>
 <div id="pad"><div id="knob"></div></div>
 <button id="stop">STOP</button>
@@ -475,7 +505,7 @@ Pan <input id="gp" type="number" step="0.01"> Tilt <input id="gt" type="number" 
 </details>
 <details><summary>Update and Wi-Fi</summary>
 <p id="fw" style="font-size:13px;color:#cfd6df;white-space:pre-line"></p>
-<div class="g2"><button onclick="$('fw').textContent='Checking...';q('/fw')">Check for update</button><button onclick="if(confirm('Update the head and the joystick box now? Both restart.')){q('/fwgo')}">Update both now</button></div>
+<div class="g2"><button onclick="$('fw').textContent='Checking...';q('/fw')">Check for update</button><button onclick="upGo()">Update both now</button></div>
 <button id="au" style="width:100%" onclick="q('/set?auto=1')"></button>
 <button style="width:100%" onclick="location.href='/wifi'">Wi-Fi and password</button>
 </details></div>
@@ -498,8 +528,26 @@ $('mo').textContent=s.on?'Switch motors OFF (camera may sag)':'Switch motors ON'
 for(var i=0;i<6;i++){$('p'+i).className=s.ps[i]?'on':''}
 $('au').textContent=s.auto?'Automatic updates: ON (tap to turn off)':'Automatic updates: OFF (tap to turn on)';$('au').className=s.auto?'on':'';
 if(s.lat>s.fw&&s.fw>0)w+='Update available: build '+s.lat+'. ';$('warn').textContent=w;
+if(!U&&s.ust>0)U={from:s.fw,target:0,jon:!!s.jon,t0:Date.now(),step:2,end:''};if(U)upDraw(s);
 $('fw').textContent='Head: build '+s.fw+' at '+s.ip+'\nJoystick box: '+(s.jon?'build '+s.jfw+' at '+s.jip:'not seen')+'\nNewest on GitHub: '+(s.lat<0?'not checked yet':'build '+s.lat)+(s.msg?'\n'+s.msg:'')}
-function q(u){return fetch(u).then(function(r){return r.json()}).then(show).catch(function(){$('st').textContent='no connection to the head'})}
+function q(u){var c=new AbortController(),t=setTimeout(function(){c.abort()},2500);return fetch(u,{signal:c.signal}).then(function(r){return r.json()}).then(show).catch(function(){$('st').textContent='no connection to the head';if(U)upDraw(null)}).then(function(){clearTimeout(t)})}
+// ---- live update progress
+var U=null;try{U=JSON.parse(sessionStorage.x70up||'null')}catch(e){}if(U&&Date.now()-U.t0>600000)U=null;
+function upGo(){if(S.lat>0&&S.fw>=S.lat&&(!S.jon||S.jfw>=S.lat)&&!confirm('Both are already on the newest build. Install it again?'))return;
+U={from:S.fw||0,target:S.lat||0,jon:!!S.jon,t0:Date.now(),step:1,end:''};upDraw(S);q('/fwgo')}
+function upDraw(s){var n=Date.now();
+if(s&&!U.end){if(s.ust==1)U.step=Math.max(U.step,2);else if(s.ust==2){U.step=3;U.pct=s.upc}else if(s.ust==3)U.step=4;else if(s.ust==4){U.end='bad';U.msg='The download failed 3 times. The head is going back to the build it had.'}
+else if(s.fw>U.from||(U.step>=2&&U.target&&s.fw>=U.target)){U.step=5;U.end='ok';U.fw=s.fw}
+else if(U.step>=2||n-U.t0>30000){U.end='bad';U.msg=s.msg||'The head came back on the same build.'}}
+if(!s&&!U.end&&U.step==3&&U.pct>=95)U.step=4;if(s&&U.end=='bad'&&s.ust==0&&s.msg)U.msg=s.msg;
+for(var i=1;i<=5;i++)$('u'+i).className='us '+(U.end=='ok'||i<U.step?'ok':i==U.step?(U.end=='bad'?'bad':'now'):'');
+$('upc').textContent=U.step==3?(U.pct||0)+' %':'';$('ub').style.width=(U.step>3||U.end=='ok'?100:U.step==3?(U.pct||0):0)+'%';
+if(U.end=='ok')$('u5t').textContent='Head running build '+U.fw;
+var j='';if(s){if(!U.jon&&!s.jon){j='';$('uj').textContent='Joystick box: not switched on'}else if(s.jon&&(U.target||U.fw)&&s.jfw>=(U.target||U.fw)){j='ok';$('uj').textContent='Joystick box running build '+s.jfw}else{j=U.end=='ok'&&n-U.t0>240000?'bad':'now';$('uj').textContent=s.jon?'Joystick box: on build '+s.jfw+', updating':'Joystick box: restarting'}$('u6').className='us '+j}
+$('ut').textContent=U.end=='ok'?'Update finished':U.end=='bad'?'Update did not finish':'Updating the head';
+$('um').textContent=U.end=='ok'?'':U.end=='bad'?U.msg:!s?'The head is restarting. This page reconnects by itself.':n-U.t0>180000?'This is taking longer than normal. Leave everything powered.':'About a minute in total. Keep this page open; nothing else is needed.';
+$('ux').hidden=!U.end;$('up').hidden=false;try{sessionStorage.x70up=JSON.stringify(U)}catch(e){}}
+$('ux').onclick=function(){U=null;$('up').hidden=true;try{sessionStorage.removeItem('x70up')}catch(e){}};
 function lim(a,e){q('/lim?a='+a+'&e='+e)}
 for(var i=0;i<6;i++){var b=document.createElement('button');b.id='p'+i;b.textContent=i+1;b.onclick=(function(n){return function(){q('/p?n='+n+(saving?'&save=1':''));saving=false;$('sv').className=''}})(i);$('pr').appendChild(b)}
 $('sv').onclick=function(){saving=!saving;$('sv').className=saving?'sv':''};
@@ -650,14 +698,14 @@ void sendStatus() {
   else if ((pan.viscaCmd != 0 || tilt.viscaCmd != 0 || pan.going || tilt.going) && (int32_t)(manualUntil - now) <= 0) src = 2;
   if (src == 0 && !trackingOn && viscaLastMs != 0 && now - viscaLastMs < 2000) src = 3;   // OBS is talking but blocked
   long pp = pan.st ? (long)(pan.st->getCurrentPosition() * sgn(pan)) : 0, tp = tilt.st ? (long)(tilt.st->getCurrentPosition() * sgn(tilt)) : 0;
-  char b[820]; String ipS = WiFi.localIP().toString(), jipS = (joySeenMs != 0 && millis() - joySeenMs < 6000) ? joyIP.toString() : String("");
+  char b[900]; String ipS = WiFi.localIP().toString(), jipS = (joySeenMs != 0 && millis() - joySeenMs < 6000) ? joyIP.toString() : String("");
   snprintf(b, sizeof b,
     "{\"on\":%d,\"trk\":%d,\"src\":%d,\"pd\":%.2f,\"td\":%.2f,\"pt\":%.3f,\"tt\":%.3f,\"gp\":%.2f,\"gt\":%.2f,\"pl\":%d,\"tl\":%d,\"dp\":%d,\"dt\":%d,"
-    "\"max\":%d,\"ramp\":%.1f,\"tsc\":%.2f,\"tramp\":%.1f,\"rssi\":%d,\"ps\":[%d,%d,%d,%d,%d,%d],\"fw\":%d,\"auto\":%d,\"lat\":%d,\"jfw\":%d,\"jon\":%d,\"ip\":\"%s\",\"jip\":\"%s\",\"msg\":\"%s\"}",
+    "\"max\":%d,\"ramp\":%.1f,\"tsc\":%.2f,\"tramp\":%.1f,\"rssi\":%d,\"ps\":[%d,%d,%d,%d,%d,%d],\"fw\":%d,\"auto\":%d,\"lat\":%d,\"jfw\":%d,\"jon\":%d,\"ip\":\"%s\",\"jip\":\"%s\",\"ust\":%d,\"upc\":%d,\"utry\":%d,\"msg\":\"%s\"}",
     motorsOn, trackingOn, src, stepsToDeg(pan, pp), stepsToDeg(tilt, tp), pp / STEPS_PER_TURN, tp / STEPS_PER_TURN, pan.gear, tilt.gear,
     limited(pan), limited(tilt), pan.found, tilt.found, (int)maxRpm, ramp, trackScale, trackRamp, (int)WiFi.RSSI(),
     presetSet[0], presetSet[1], presetSet[2], presetSet[3], presetSet[4], presetSet[5],
-    FW_BUILD, autoUpdate, latestBuild, joyBuild, (int)(joySeenMs != 0 && millis() - joySeenMs < 6000), ipS.c_str(), jipS.c_str(), fwMsg.c_str());
+    FW_BUILD, autoUpdate, latestBuild, joyBuild, (int)(joySeenMs != 0 && millis() - joySeenMs < 6000), ipS.c_str(), jipS.c_str(), updMode ? (updStage ? (int)updStage : 1) : 0, (int)updPct, (int)updTry, fwMsg.c_str());
   web.send(200, "application/json", b);
 }
 
@@ -721,7 +769,7 @@ void webSetup() {
   web.on("/fw", []() { if (headMoving()) fwMsg = "Stop the head first"; else checkLatest(); sendStatus(); });
   web.on("/fwgo", []() {
     if (headMoving()) fwMsg = "Stop the head first";
-    else { fwMsg = "Updating... the page comes back in about a minute"; updateRequested = true; }
+    else { fwMsg = "Restarting to update"; updateRequested = true; }
     sendStatus();
   });
   web.on("/wifi", []() {
@@ -801,6 +849,12 @@ void setup() {
     WiFi.mode(WIFI_AP); WiFi.softAP(AP_NAME, devPass.c_str());
     Serial.printf("\nNo Wi-Fi yet. Join the Wi-Fi \"%s\" (password %s), then open http://192.168.4.1/wifi\n", AP_NAME, devPass.c_str());
   }
+  if (prefs.getBool("upd", false)) {                     // this start-up is for installing an update
+    prefs.putBool("upd", false);
+    if (joined) updMode = true; else prefs.putString("updmsg", "Update failed: the head could not join the Wi-Fi");
+  }
+  fwMsg = prefs.getString("updmsg", ""); if (fwMsg.length()) prefs.remove("updmsg");
+  if (updMode) { webSetup(); xTaskCreate(updateTask, "update", 16384, NULL, 1, NULL); return; }
   ArduinoOTA.setHostname("x70head");                     // also starts the x70head.local name
   ArduinoOTA.setPassword(devPass.c_str());
   ArduinoOTA.onStart([]() { stopAll(); for (Axis *x : AX) if (x->st) x->st->forceStop(); });   // stand still while updating
@@ -812,6 +866,7 @@ void setup() {
 }
 
 void loop() {
+  if (updMode) { web.handleClient(); delay(2); return; }      // update in progress: only the page is served
   static uint32_t lastTick = 0;
   uint32_t now = millis();
   if (now - lastTick >= 10) { float dt = (now - lastTick) * 0.001f; if (dt > 0.05f) dt = 0.05f; lastTick = now; motionTick(dt); }
@@ -840,7 +895,7 @@ void loop() {
     updateRequested = false;
     for (int i = 0; i < 3; i++) { tellJoystick("U"); delay(30); }   // tell the joystick box to update itself too
     delay(300);
-    selfUpdate();                                                           // restarts on success
+    requestUpdateRestart();
   }
   if (WiFi.getMode() == WIFI_STA && WiFi.status() != WL_CONNECTED) {      // Wi-Fi dropped: stop moving, it rejoins on its own
     static uint32_t lastTry = 0;
