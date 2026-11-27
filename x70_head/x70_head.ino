@@ -381,12 +381,18 @@ void broadcastText(const char *msg, int port) {
   WiFiUDP u; u.beginPacket(bc, port); u.write((const uint8_t *)msg, strlen(msg)); u.endPacket();
 }
 void selfUpdate() {                            // downloads and installs the newest head firmware, then restarts
-  setMotors(true);                             // keep holding the camera while it downloads
-  WiFiClientSecure c; c.setInsecure();
+  if (pan.found && tilt.found) setMotors(true);   // keep holding the camera while it downloads
+  viscaClient.stop(); pan.viscaCmd = tilt.viscaCmd = 0;   // free the tracker's connection: the download needs the memory
   httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   httpUpdate.rebootOnUpdate(true);
-  t_httpUpdate_return r = httpUpdate.update(c, String(FW_BASE) + FW_FILE);
-  if (r == HTTP_UPDATE_FAILED) fwMsg = "Update failed: " + httpUpdate.getLastErrorString();
+  for (int attempt = 1; attempt <= 3; attempt++) {         // a dropped download is retried by itself
+    WiFiClientSecure c; c.setInsecure();
+    t_httpUpdate_return r = httpUpdate.update(c, String(FW_BASE) + FW_FILE);
+    if (r != HTTP_UPDATE_FAILED) return;
+    fwMsg = "Update failed (" + String(attempt) + " of 3 tries): " + httpUpdate.getLastErrorString();
+    Serial.println(fwMsg);
+    delay(1500);
+  }
 }
 
 void tellJoystick(const char *msg) {          // straight to the box if its address is known, and to everyone as a fallback
@@ -514,15 +520,16 @@ h3{margin:18px 0 4px;font-size:13px;color:#9aa5b4;text-transform:uppercase;lette
 label{display:block;margin:12px 0 2px;font-size:13px;color:#cfd6df}label b{float:right;color:#e8ecf1}
 input[type=range]{width:100%}small{color:#9aa5b4;display:block}
 input[type=text],input[type=password],input[type=number],select{width:100%;box-sizing:border-box;background:#222830;color:#e8ecf1;border:1px solid #3a4452;border-radius:8px;padding:9px;font-size:16px;margin:2px 0 6px}
-.warn{color:#f2a93b;font-size:13px}#os{font-size:13px;color:#9aa5b4;margin:6px 0}
+.warn{color:#f2a93b;font-size:13px}.ok{color:#6fcf97}.hi{color:#f2a93b}.g3{display:grid;grid-template-columns:1fr;gap:0}details{margin-top:14px;background:#1b2027;border-radius:10px;padding:8px 12px}summary{padding:6px 0}label i{font-style:normal;font-size:12px;margin-left:6px}#os{font-size:13px;color:#9aa5b4;margin:6px 0}
 </style></head><body><div class="w">
 <a href="/">&larr; Head controls</a>
 <h3>Head (changes apply at once)</h3>
 <small id="adr"></small><div id="hw" class="warn"></div>
-<label>Tracking speed scale <b id="v_tsc"></b></label><input id="tsc" type="range" min="0.05" max="1" step="0.05">
-<small>Lower = finer, gentler tracking moves. The joystick is not affected.</small>
-<label>Tracking ease in / out <b id="v_tramp"></b></label><input id="tramp" type="range" min="0.2" max="2" step="0.1">
 <button id="trk"></button>
+<label>Gentleness of tracking moves <b id="v_tsc"></b></label><input id="tsc" type="range" min="0.05" max="1" step="0.05">
+<small>Left = slower, finer moves. Right = faster, coarser. Good: 0.15 to 0.30. The joystick is not affected.</small>
+<label>Soft start and stop <b id="v_tramp"></b></label><input id="tramp" type="range" min="0.2" max="2" step="0.1">
+<small>How long a tracking move takes to speed up and slow down. Good: 0.4 to 0.8 s. Longer looks smoother but reacts later.</small>
 <h3>OBS Face Tracker PTZ (live)</h3>
 <div id="cn">
 <small>In OBS: Tools &rarr; WebSocket Server Settings &rarr; enable, and copy the password. Stored only in this browser.</small>
@@ -533,28 +540,45 @@ Password<input id="pw" type="password" autocomplete="off">
 <div id="os">Not connected to OBS.</div>
 <div id="ob" hidden>
 <button id="en"></button>
-<h3>Start values</h3>
-<select id="shot"><option value="6">Waist-up shot</option><option value="11">Full-body shot</option><option value="25">Wide stage shot</option></select>
-<button id="rec">Load recommended start values</button>
-<h3>Fine tuning</h3><div id="sl"></div>
-<button id="ix"></button><button id="iy"></button>
+<h3>1. Start here</h3>
+<select id="shot"><option value="6">Waist-up shot</option><option value="11" selected>Full-body shot</option><option value="25">Wide stage shot</option></select>
+<button id="rec">Load the recommended settings for this shot</button>
+<h3>2. Fix what you see</h3>
+<button data-fix="calm">Camera swings past the person and back &rarr; make it calmer</button>
+<button data-fix="fast">Camera lags behind the person &rarr; make it quicker</button>
+<button data-fix="still">Camera twitches when the person barely moves &rarr; make it steadier</button>
+<button data-fix="tight">Person drifts too far off-centre before it moves &rarr; make it tighter</button>
+<h3>3. Framing and speed</h3><div id="sl"></div>
+<details><summary>More settings (rarely needed)</summary><div id="sl2"></div>
+<button id="ix"></button><button id="iy"></button></details>
 </div></div>
 <script>
 var $=function(i){return document.getElementById(i)},H={},ws=null,rid=0,cb={},SRC='',FLT='',FS={},FPS=30,tm={};
-var P=[['Kp_x_db','Pan speed',20,80,1,' dB'],['Kp_y_db','Tilt speed',20,80,1,' dB'],
-['e_deadband_x','Pan dead band (ignore small moves)',0,20,0.5,' %'],['e_nonlinear_x','Pan soft band',0,20,0.5,' %'],
-['e_deadband_y','Tilt dead band',0,20,0.5,' %'],['e_nonlinear_y','Tilt soft band',0,20,0.5,' %'],
-['track_x','Subject left / right in frame',-0.5,0.5,0.01,''],['track_y','Head room (higher = subject higher)',-0.5,0.5,0.01,''],
-['Ki_x','Pan follow-through',0,1,0.01,''],['Ki_y','Tilt follow-through',0,1,0.01,''],
-['Td_x','Pan quick start',0,1,0.01,' s'],['Td_y','Tilt quick start',0,1,0.01,' s'],
-['Tdlpf','Smoothing',0,10,0.1,' s'],['track_fps','Tracking rate (0 = every frame)',0,60,1,' fps']];
+// key, label, min, max, step, unit, good-from, good-to, advice when below, advice when above, basic(1)/more(0)
+var P=[['track_y','Head room: face higher or lower',-0.5,0.5,0.01,'',0.15,0.35,'face near the middle, a lot of space above','face near the top edge',1],
+['Kp_x_db','Pan speed',20,80,1,' dB',0,0,'slow, may lag behind','fast, may swing past the person',1],
+['Kp_y_db','Tilt speed',20,80,1,' dB',0,0,'slow, may lag behind','fast, may bob up and down',1],
+['e_deadband_x','Still zone, left and right',0,20,0.5,' %',1,4,'follows every small move','person can sit far off-centre',1],
+['e_deadband_y','Still zone, up and down',0,20,0.5,' %',3,8,'bobs when the person nods','slow to follow up and down',1],
+['lock_hold','Stay on the same person when the face is hidden',1,60,1,' s',5,15,'may jump to someone else quickly','may follow nothing for a while',1],
+['track_x','Face left or right in the picture',-0.5,0.5,0.01,'',-0.1,0.1,'person sits left','person sits right',0],
+['e_nonlinear_x','Soft edge of still zone, left and right',0,20,0.5,' %',2,6,'starts abruptly','vague, slow to start',0],
+['e_nonlinear_y','Soft edge of still zone, up and down',0,20,0.5,' %',4,8,'starts abruptly','vague, slow to start',0],
+['Ki_x','Pan follow-through',0,1,0.01,'',0.1,0.3,'falls behind steady walking','overshoots when the person stops',0],
+['Ki_y','Tilt follow-through',0,1,0.01,'',0.1,0.3,'falls behind','overshoots',0],
+['Td_x','Pan quick start',0,1,0.01,' s',0.1,0.4,'slow to react','shaky',0],
+['Td_y','Tilt quick start',0,1,0.01,' s',0.1,0.4,'slow to react','shaky',0],
+['Tdlpf','Smoothing',0,10,0.1,' s',1,3,'jittery','sluggish',0],
+['detect_interval','Look for faces every',0.2,5,0.1,' s',0.5,2,'more CPU','slow to notice a new face',0],
+['track_fps','Tracking rate (0 = every frame)',0,60,1,' fps',8,15,'jerky','more CPU',0]];
+var KP=56;
 function q(u){return fetch(u).then(function(r){return r.json()}).then(head).catch(function(){})}
 function head(s){H=s;var w='';if(!(s.gp>0)||!(s.gt>0))w='Gear ratios are not set on the head page, so tracking speeds are not calibrated. ';
-if(!s.trk)w+='Tracking is blocked on the head. ';$('hw').textContent=w;$('adr').textContent='Head '+s.ip+' (use this and port 5678 in the OBS filter)   Joystick '+(s.jip||'not seen');
+if(!s.trk)w+='Tracking is blocked (CW/CCW button is out). ';$('hw').textContent=w;$('adr').textContent='Head '+(s.ip||'?')+'   Joystick '+(s.jip||'not seen');
 if(document.activeElement!=$('tsc'))$('tsc').value=s.tsc;$('v_tsc').textContent=(+s.tsc).toFixed(2)+' x';
 if(document.activeElement!=$('tramp'))$('tramp').value=s.tramp;$('v_tramp').textContent=(+s.tramp).toFixed(1)+' s';
 $('trk').textContent=s.trk?'Face tracking allowed (tap to block)':'Face tracking BLOCKED (tap to allow)';$('trk').className=s.trk?'on':'sv'}
-$('tsc').oninput=function(){$('v_tsc').textContent=(+this.value).toFixed(2)+' x'};$('tsc').onchange=function(){q('/set?tsc='+this.value)};
+$('tsc').oninput=function(){$('v_tsc').textContent=(+this.value).toFixed(2)+' x'};$('tsc').onchange=function(){q('/set?tsc='+this.value).then(function(){if(SRC)paint()})};
 $('tramp').oninput=function(){$('v_tramp').textContent=(+this.value).toFixed(1)+' s'};$('tramp').onchange=function(){q('/set?tramp='+this.value)};
 $('trk').onclick=function(){q('/trk')};
 setInterval(function(){q('/s')},1500);q('/s');
@@ -593,19 +617,27 @@ if(!fl){next();return}SRC=nm;FLT=fl.filterName;
 req('GetSourceFilterDefaultSettings',{filterKind:'face_tracker_ptz'}).then(function(d){FS=Object.assign({},d.defaultFilterSettings||{},fl.filterSettings||{});FS._en=fl.filterEnabled;build()},function(){FS=Object.assign({},fl.filterSettings||{});FS._en=fl.filterEnabled;build()})},next)}
 next()}).catch(function(e){os('OBS error: '+e)})}
 function fmt(p,v){return(+v).toFixed(p[4]<0.1?2:(p[4]<1?1:0))+p[5]}
+function good(p){if(p[0]=='Kp_x_db')return[KP-5,KP+3];if(p[0]=='Kp_y_db')return[KP-8,KP];return[p[6],p[7]]}
+function note(p,v){var g=good(p);return v<g[0]?'<i class="hi">'+p[8]+'</i>':v>g[1]?'<i class="hi">'+p[9]+'</i>':'<i class="ok">good</i>'}
+function base(){var fov=+$('shot').value,s=+(H.tsc||0.2);return Math.max(25,Math.min(77,Math.round(20*Math.log10(fov*0.75*FPS/s))))}
 function setv(k,v){FS[k]=v;clearTimeout(tm[k]);tm[k]=setTimeout(function(){var o={};o[k]=v;req('SetSourceFilterSettings',{sourceName:SRC,filterName:FLT,filterSettings:o,overlay:true}).catch(function(e){os('OBS error: '+e)})},120)}
-function build(){os('Connected: filter "'+FLT+'" on "'+SRC+'", OBS at '+FPS.toFixed(0)+' fps.');$('ob').hidden=false;var h='';
-P.forEach(function(p){h+='<label>'+p[1]+' <b id="v_'+p[0]+'"></b></label><input type="range" id="s_'+p[0]+'" min="'+p[2]+'" max="'+p[3]+'" step="'+p[4]+'">'});$('sl').innerHTML=h;
-P.forEach(function(p){var e=$('s_'+p[0]);e.oninput=function(){var v=+e.value;$('v_'+p[0]).textContent=fmt(p,v);setv(p[0],v)}});paint()}
-function paint(){P.forEach(function(p){var v=FS[p[0]];if(v===undefined)v=0;$('s_'+p[0]).value=v;$('v_'+p[0]).textContent=fmt(p,v)});
+function build(){os('Connected: filter "'+FLT+'" on "'+SRC+'", OBS at '+FPS.toFixed(0)+' fps.');$('ob').hidden=false;var h=['',''];
+P.forEach(function(p){var g=good(p);h[p[10]?0:1]+='<label>'+p[1]+' <b id="v_'+p[0]+'"></b></label><input type="range" id="s_'+p[0]+'" min="'+p[2]+'" max="'+p[3]+'" step="'+p[4]+'"><small id="n_'+p[0]+'"></small>'});$('sl').innerHTML=h[0];$('sl2').innerHTML=h[1];
+P.forEach(function(p){var e=$('s_'+p[0]);e.oninput=function(){var v=+e.value;show1(p,v);setv(p[0],v)}});paint()}
+function show1(p,v){var g=good(p);$('v_'+p[0]).innerHTML=fmt(p,v)+note(p,v);$('n_'+p[0]).textContent='Good: '+fmt(p,g[0])+' to '+fmt(p,g[1])}
+function nudge(k,d){var p=P.filter(function(x){return x[0]==k})[0],v=Math.max(p[2],Math.min(p[3],(+FS[k]||0)+d));setv(k,v);$('s_'+k).value=v;show1(p,v)}
+var FIX={calm:[['Kp_x_db',-3],['Kp_y_db',-3]],fast:[['Kp_x_db',3],['Kp_y_db',3]],still:[['e_deadband_x',1],['e_deadband_y',1]],tight:[['e_deadband_x',-1],['e_deadband_y',-1]]};
+Array.prototype.forEach.call(document.querySelectorAll('[data-fix]'),function(b){b.onclick=function(){FIX[b.dataset.fix].forEach(function(f){nudge(f[0],f[1])});os('Changed. Watch the camera for a minute before changing it again.')}});
+$('shot').onchange=function(){KP=base();if(SRC)paint()};
+function paint(){KP=base();P.forEach(function(p){var v=FS[p[0]];if(v===undefined)v=0;$('s_'+p[0]).value=v;show1(p,+v)});
 $('en').textContent=FS._en?'Plugin tracking is ON (tap to switch off)':'Plugin tracking is OFF (tap to switch on)';$('en').className=FS._en?'on':'sv';
 $('ix').textContent='Reverse pan direction: '+(FS.invert_x?'ON':'off');$('iy').textContent='Reverse tilt direction: '+(FS.invert_y?'ON':'off')}
 $('en').onclick=function(){var v=!FS._en;req('SetSourceFilterEnabled',{sourceName:SRC,filterName:FLT,filterEnabled:v}).then(function(){FS._en=v;paint()},function(e){os('OBS error: '+e)})};
 $('ix').onclick=function(){setv('invert_x',!FS.invert_x);paint()};$('iy').onclick=function(){setv('invert_y',!FS.invert_y);paint()};
 // Start values: loop gain about 1 per second for the chosen shot width, the OBS frame rate and the head's speed scale.
-function rec(){var fov=+$('shot').value,s=+(H.tsc||0.2),kp=Math.round(20*Math.log10(fov*0.75*FPS/s));kp=Math.max(20,Math.min(80,kp));
-var v={Kp_x_db:kp,Kp_y_db:Math.max(20,kp-3),e_deadband_x:2,e_nonlinear_x:4,e_deadband_y:4,e_nonlinear_y:6,track_x:0,track_y:fov<8?0.2:0.3,Ki_x:0.2,Ki_y:0.2,Td_x:0.25,Td_y:0.25,Tdlpf:2,track_fps:12,e_deadband_z:50,Ki_z:0,Td_z:0,Kp_z_db:-40};
-Object.assign(FS,v);req('SetSourceFilterSettings',{sourceName:SRC,filterName:FLT,filterSettings:v,overlay:true}).then(function(){paint();os('Start values loaded (pan speed '+kp+' dB for '+FPS.toFixed(0)+' fps, scale '+s+').')},function(e){os('OBS error: '+e)})}
+function rec(){var fov=+$('shot').value,s=+(H.tsc||0.2),kp=base();KP=kp;
+var v={Kp_x_db:kp,Kp_y_db:Math.max(20,kp-3),e_deadband_x:2,e_nonlinear_x:4,e_deadband_y:4,e_nonlinear_y:6,track_x:0,track_y:fov<8?0.2:0.25,Ki_x:0.2,Ki_y:0.2,Td_x:0.25,Td_y:0.25,Tdlpf:2,track_fps:12,lock_hold:10,detect_interval:1,e_deadband_z:50,Ki_z:0,Td_z:0,Kp_z_db:-40};
+Object.assign(FS,v);req('SetSourceFilterSettings',{sourceName:SRC,filterName:FLT,filterSettings:v,overlay:true}).then(function(){paint();os('Recommended settings loaded for this shot.')},function(e){os('OBS error: '+e)})}
 $('rec').onclick=rec;$('go').onclick=connect;
 try{var sv=JSON.parse(localStorage.getItem('x70obs')||'null');if(sv){$('ip').value=sv.ip;$('port').value=sv.port;$('pw').value=sv.pw}}catch(e){}
 </script></body></html>)HTML";
