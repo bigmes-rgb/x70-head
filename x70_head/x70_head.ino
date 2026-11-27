@@ -307,8 +307,9 @@ int viscaHandle(const uint8_t *p, int n, uint8_t *out) {
       pan.viscaCmd  = p[6] == 0x01 ? -ps : (p[6] == 0x02 ? ps : 0);         // 01 left, 02 right
       if (p[6] != 0x03 || p[7] != 0x03) lastInputMs = millis();
       tilt.viscaCmd = p[7] == 0x01 ? ts : (p[7] == 0x02 ? -ts : 0);         // 01 up, 02 down
+      if (!trackingOn) pan.viscaCmd = tilt.viscaCmd = 0;                    // blocked: the command is thrown away here
     } else if (n >= 15 && p[2] == 0x06 && (p[3] == 0x02 || p[3] == 0x03)) { // absolute / relative position
-      if (pan.gear > 0 && tilt.gear > 0 && pan.st && tilt.st) {
+      if (trackingOn && pan.gear > 0 && tilt.gear > 0 && pan.st && tilt.st) {
         long a = viscaToSteps(pan, nib4(p + 6)), b = viscaToSteps(tilt, nib4(p + 10));
         if (p[3] == 0x03) { a += pan.st->getCurrentPosition(); b += tilt.st->getCurrentPosition(); }
         gotoPos(a, b);
@@ -487,7 +488,7 @@ pad.onpointerdown=function(e){act=true;pad.setPointerCapture(e.pointerId);mv(e)}
 pad.onpointermove=function(e){if(act)mv(e)};
 pad.onpointerup=pad.onpointercancel=function(){act=false;X=Y=0;setK()};
 function show(s){S=s;var t=(s.gp>0?'Pan '+s.pd.toFixed(1)+'°':'Pan '+s.pt.toFixed(2)+' motor turns')+'   '+(s.gt>0?'Tilt '+s.td.toFixed(1)+'°':'Tilt '+s.tt.toFixed(2)+' motor turns');
-t+='\n'+(s.src==2?'OBS face tracking is sending commands':s.src==1?'Joystick':(s.on?'Holding':'No commands'))+(s.on?'':' (MOTORS OFF)')+'   Wi-Fi '+s.rssi+' dBm';t+='\nHead '+s.ip+'   Joystick '+(s.jip||'not seen');$('st').textContent=t;
+t+='\n'+(s.src==3?'OBS is sending commands: IGNORED, tracking is blocked':s.src==2?'OBS face tracking is moving the head':s.src==1?'Joystick':(s.on?'Holding':'No commands'))+(s.on?'':' (MOTORS OFF)')+'   Wi-Fi '+s.rssi+' dBm';t+='\nHead '+s.ip+'   Joystick '+(s.jip||'not seen');$('st').textContent=t;
 var w='';if(!s.dp)w+='Pan driver not answering. ';if(!s.dt)w+='Tilt driver not answering. ';if(!s.pl)w+='Pan limits not set (slow). ';if(!s.tl)w+='Tilt limits not set (slow). ';$('warn').textContent=w;
 if(document.activeElement!=$('max')){$('max').value=s.max}$('mv').textContent=s.max+' RPM motor';
 if(document.activeElement!=$('ramp')){$('ramp').value=s.ramp}$('rv').textContent=s.ramp.toFixed(1)+' s';
@@ -647,6 +648,7 @@ void sendStatus() {
   int src = 0;
   if (pan.webCmd != 0 || tilt.webCmd != 0) src = 1;
   else if ((pan.viscaCmd != 0 || tilt.viscaCmd != 0 || pan.going || tilt.going) && (int32_t)(manualUntil - now) <= 0) src = 2;
+  if (src == 0 && !trackingOn && viscaLastMs != 0 && now - viscaLastMs < 2000) src = 3;   // OBS is talking but blocked
   long pp = pan.st ? (long)(pan.st->getCurrentPosition() * sgn(pan)) : 0, tp = tilt.st ? (long)(tilt.st->getCurrentPosition() * sgn(tilt)) : 0;
   char b[820]; String ipS = WiFi.localIP().toString(), jipS = (joySeenMs != 0 && millis() - joySeenMs < 6000) ? joyIP.toString() : String("");
   snprintf(b, sizeof b,
