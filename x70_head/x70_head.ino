@@ -116,6 +116,14 @@ uint32_t lastWebMs = 0, manualUntil = 0, lastMoveMs = 0;
 // sends "zero" many times a second).
 float stickCmd[2][2] = {{0, 0}, {0, 0}}; uint32_t stickMs[2] = {0, 0};
 bool stickFromBox = false;               // who is moving the head by stick right now
+// ---- telemetry: what each axis was asked to do on the last motion tick, what it did, and what stopped it
+enum { WHY_IDLE = 0, WHY_MOVING, WHY_NO_MOTOR, WHY_MOTORS_OFF, WHY_PRESET, WHY_LIMIT_HI, WHY_LIMIT_LO, WHY_EASING };
+int   whyCode[2] = {0, 0};          // one of the above, per axis (0 = pan, 1 = tilt)
+float tWant[2] = {0, 0}, tTarget[2] = {0, 0};   // wanted speed as the user sees it, and as the motor is asked, steps/s
+uint32_t tBlockedSince[2] = {0, 0}; // a command is being refused since then (0 = not refused)
+uint32_t httpCount = 0, stickCount[2] = {0, 0}, loopMaxMs = 0;
+char reqLog[10][44]; int reqHead = 0; // the last few requests from the page
+void reqNote(const char *what) { snprintf(reqLog[reqHead], sizeof reqLog[0], "%lu.%03lu %s", millis() / 1000, millis() % 1000, what); reqHead = (reqHead + 1) % 10; httpCount++; }
 void stickClear() { stickCmd[0][0] = stickCmd[0][1] = stickCmd[1][0] = stickCmd[1][1] = 0; }
 const int NPRESET = 6;
 bool presetSet[NPRESET]; long presetPos[NPRESET][2];
@@ -211,9 +219,9 @@ void setMotors(bool on);
 // The last things that happened, with the time since power-up. Shown on the page ("Recent events") so that an odd
 // movement can be traced to its cause afterwards.
 const int NEV = 96;
-char evBuf[NEV][76]; int evHead = 0, evCount = 0;
+char evBuf[NEV][100]; int evHead = 0, evCount = 0;
 void ev(const char *fmt, ...) {
-  char m[60]; va_list ap; va_start(ap, fmt); vsnprintf(m, sizeof m, fmt, ap); va_end(ap);
+  char m[88]; va_list ap; va_start(ap, fmt); vsnprintf(m, sizeof m, fmt, ap); va_end(ap);
   uint32_t t = millis() / 1000;
   snprintf(evBuf[evHead], sizeof evBuf[0], "%02u:%02u:%02u  %s", (unsigned)(t / 3600), (unsigned)(t / 60 % 60), (unsigned)(t % 60), m);
   Serial.println(evBuf[evHead]);
@@ -293,16 +301,19 @@ void motionTick(float dt) {
   if ((pan.viscaCmd != 0 || tilt.viscaCmd != 0) && now - viscaLastMs > VISCA_DEADMAN_MS) pan.viscaCmd = tilt.viscaCmd = 0;
   for (Axis *xp : AX) {
     Axis &x = *xp;
-    if (!x.st) continue;
+    const int ai = xp == &tilt ? 1 : 0;
+    if (!x.st) { whyCode[ai] = WHY_NO_MOTOR; continue; }
     float want = (manual || !trackingOn) ? x.webCmd : (x.webCmd != 0 ? x.webCmd : x.viscaCmd);
-    if (!motorsOn) want = 0;
+    tWant[ai] = want;
+    if (!motorsOn) { if (want != 0) whyCode[ai] = WHY_MOTORS_OFF; else whyCode[ai] = WHY_IDLE; want = 0; }
     if (want != 0) x.trk = (x.webCmd == 0);                              // who started this move: tracking or the joystick
     if (x.going) {
       if (want != 0) { x.going = false; x.v = x.st->getCurrentSpeedInMilliHz() / 1000.0f; x.a = 0; }   // joystick takes over mid-move
-      else { if (!x.st->isRunning()) { x.going = false; x.v = x.a = 0; } else lastMoveMs = now; continue; }
+      else { if (!x.st->isRunning()) { x.going = false; x.v = x.a = 0; } else lastMoveMs = now; whyCode[ai] = WHY_PRESET; continue; }
     }
     float cap = capSps(x);
     float target = constrain(want * sgn(x), -cap, cap);                    // motor direction
+    tTarget[ai] = target; int why = motorsOn || tWant[ai] == 0 ? (target != 0 ? WHY_EASING : WHY_IDLE) : WHY_MOTORS_OFF;
     // critically damped follow: eases in and eases out, and copes with a target that keeps changing (face tracking)
     float w = 4.74f / (x.trk ? trackRamp : ramp);                                                // reaches 95 % of the new speed in 'ramp' seconds
     float vBefore = x.v;
@@ -320,9 +331,16 @@ void motionTick(float dt) {
     // limits: the closer to the end, the slower it may go toward it
     long pos = x.st->getCurrentPosition();
     float brake = maxSps() / STOP_TIME;
-    if (x.v > 0 && x.hasHi) { float d = (float)(x.hi - pos) - 3.0f * MICROSTEPS; float lim = d > 0 ? sqrtf(2.0f * brake * d) : 0; if (x.v > lim) { x.v = lim; if (x.a > 0) x.a = 0; } }
-    if (x.v < 0 && x.hasLo) { float d = (float)(pos - x.lo) - 3.0f * MICROSTEPS; float lim = d > 0 ? sqrtf(2.0f * brake * d) : 0; if (-x.v > lim) { x.v = -lim; if (x.a < 0) x.a = 0; } }
+    if (x.v > 0 && x.hasHi) { float d = (float)(x.hi - pos) - 3.0f * MICROSTEPS; float lim = d > 0 ? sqrtf(2.0f * brake * d) : 0; if (x.v > lim) { x.v = lim; if (x.a > 0) x.a = 0; if (lim == 0 && target > 0) why = WHY_LIMIT_HI; } }
+    if (x.v < 0 && x.hasLo) { float d = (float)(pos - x.lo) - 3.0f * MICROSTEPS; float lim = d > 0 ? sqrtf(2.0f * brake * d) : 0; if (-x.v > lim) { x.v = -lim; if (x.a < 0) x.a = 0; if (lim == 0 && target < 0) why = WHY_LIMIT_LO; } }
     float s = fabsf(x.v);
+    if (s >= 1.0f && why == WHY_EASING) why = WHY_MOVING;
+    whyCode[ai] = why;
+    // A command that is refused for a second goes into the event log once, with the numbers.
+    if (tWant[ai] != 0 && (why == WHY_LIMIT_HI || why == WHY_LIMIT_LO || why == WHY_MOTORS_OFF)) {
+      if (tBlockedSince[ai] == 0) tBlockedSince[ai] = now | 1;
+      else if (tBlockedSince[ai] != 2 && now - tBlockedSince[ai] > 1000) { tBlockedSince[ai] = 2; ev("%s %s REFUSED: %s pos %ld lo %ld%c hi %ld%c", x.name, tWant[ai] > 0 ? "+" : "-", why == WHY_MOTORS_OFF ? "motors off" : why == WHY_LIMIT_HI ? "motor hi limit" : "motor lo limit", pos, x.lo, x.hasLo ? '*' : ' ', x.hi, x.hasHi ? '*' : ' '); }
+    } else tBlockedSince[ai] = 0;
     if (s < 1.0f) {
       if (target == 0) { x.v = x.a = 0; }
       if (x.st->isRunning()) { x.st->setAcceleration((int32_t)brake); x.st->applySpeedAcceleration(); x.st->stopMove(); }
@@ -515,7 +533,7 @@ void tellJoystick(const char *msg) {          // straight to the box if its addr
 void joyInput(float x, float y, int who) {              // x, y from -1 to 1; who: 0 = the page, 1 = the joystick box
   auto curve = [](float u) { float m = fabsf(u); if (m < 0.06f) return 0.0f; m = (m - 0.06f) / 0.94f; return (u < 0 ? -1.0f : 1.0f) * m * m; };   // even build-up: fine near the middle without a sudden surge at the end of the stick's travel
   stickCmd[who][0] = curve(constrain(x, -1.0f, 1.0f)) * maxSps() * joyScale; stickCmd[who][1] = curve(constrain(y, -1.0f, 1.0f)) * maxSps() * joyScale;
-  stickMs[who] = lastWebMs = millis();
+  stickMs[who] = lastWebMs = millis(); stickCount[who]++;
   if (stickCmd[who][0] != 0 || stickCmd[who][1] != 0) { manualUntil = lastWebMs + MANUAL_HOLD_MS; lastInputMs = lastWebMs; }
 }
 void recallPreset(int n) {
@@ -556,11 +574,11 @@ void sendStatus() {
   else if ((pan.viscaCmd != 0 || tilt.viscaCmd != 0 || pan.going || tilt.going) && (int32_t)(manualUntil - now) <= 0) src = 2;
   if (src == 0 && !trackingOn && viscaLastMs != 0 && now - viscaLastMs < 2000) src = 3;   // OBS is talking but blocked
   long pp = pan.st ? (long)(pan.st->getCurrentPosition() * sgn(pan)) : 0, tp = tilt.st ? (long)(tilt.st->getCurrentPosition() * sgn(tilt)) : 0;
-  static char b[1900]; String ipS = WiFi.localIP().toString(), jipS = (joySeenMs != 0 && millis() - joySeenMs < 6000) ? joyIP.toString() : String("");
+  static char b[2100]; String ipS = WiFi.localIP().toString(), jipS = (joySeenMs != 0 && millis() - joySeenMs < 6000) ? joyIP.toString() : String("");
   snprintf(b, sizeof b,
     "{\"on\":%d,\"trk\":%d,\"src\":%d,\"pd\":%.2f,\"td\":%.2f,\"pt\":%.3f,\"tt\":%.3f,\"gp\":%.2f,\"gt\":%.2f,\"pl\":%d,\"tl\":%d,\"dp\":%d,\"dt\":%d,"
     "\"max\":%d,\"ramp\":%.1f,\"tsc\":%.2f,\"tramp\":%.1f,\"rssi\":%d,\"ps\":[%d,%d,%d,%d,%d,%d],\"fw\":%d,\"auto\":%d,\"lat\":%d,\"jfw\":%d,\"jon\":%d,\"ip\":\"%s\",\"jip\":\"%s\",\"ust\":%d,\"upc\":%d,\"utry\":%d,\"chk\":%d,\"obs\":%d,\"jsc\":%.2f,\"heap\":%d,\"blk\":%d,\"msg\":\"%s\",\"sd\":%d,\"inv\":[%d,%d],\"lm\":[%d,%d,%d,%d],\"lv\":[%.3f,%.3f,%.3f,%.3f],"
-    "\"pp\":[[%.3f,%.3f],[%.3f,%.3f],[%.3f,%.3f],[%.3f,%.3f],[%.3f,%.3f],[%.3f,%.3f]],\"pn\":[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"],\"up\":%lu}",
+    "\"pp\":[[%.3f,%.3f],[%.3f,%.3f],[%.3f,%.3f],[%.3f,%.3f],[%.3f,%.3f],[%.3f,%.3f]],\"pn\":[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"],\"up\":%lu,\"why\":[%d,%d],\"sk\":[%.2f,%.2f,%.2f,%.2f],\"vn\":[%.3f,%.3f]}",
     motorsOn, trackingOn, src, stepsToDeg(pan, pp), stepsToDeg(tilt, tp), pp / STEPS_PER_TURN, tp / STEPS_PER_TURN, pan.gear, tilt.gear,
     limited(pan), limited(tilt), pan.found, tilt.found, (int)maxRpm, ramp, trackScale, trackRamp, (int)WiFi.RSSI(),
     presetSet[0], presetSet[1], presetSet[2], presetSet[3], presetSet[4], presetSet[5],
@@ -572,7 +590,12 @@ void sendStatus() {
     presetPos[0][0] * sgn(pan) / STEPS_PER_TURN, presetPos[0][1] * sgn(tilt) / STEPS_PER_TURN, presetPos[1][0] * sgn(pan) / STEPS_PER_TURN, presetPos[1][1] * sgn(tilt) / STEPS_PER_TURN,
     presetPos[2][0] * sgn(pan) / STEPS_PER_TURN, presetPos[2][1] * sgn(tilt) / STEPS_PER_TURN, presetPos[3][0] * sgn(pan) / STEPS_PER_TURN, presetPos[3][1] * sgn(tilt) / STEPS_PER_TURN,
     presetPos[4][0] * sgn(pan) / STEPS_PER_TURN, presetPos[4][1] * sgn(tilt) / STEPS_PER_TURN, presetPos[5][0] * sgn(pan) / STEPS_PER_TURN, presetPos[5][1] * sgn(tilt) / STEPS_PER_TURN,
-    presetName[0], presetName[1], presetName[2], presetName[3], presetName[4], presetName[5], (unsigned long)(millis() / 1000));
+    presetName[0], presetName[1], presetName[2], presetName[3], presetName[4], presetName[5], (unsigned long)(millis() / 1000),
+    whyCode[0], whyCode[1],
+    // each stick as the head has it right now, share of the stick's full speed: page pan, page tilt, box pan, box tilt (0 once it has gone quiet)
+    (millis() - stickMs[0] < DEADMAN_MS ? stickCmd[0][0] : 0) / (maxSps() * joyScale), (millis() - stickMs[0] < DEADMAN_MS ? stickCmd[0][1] : 0) / (maxSps() * joyScale),
+    (millis() - stickMs[1] < DEADMAN_MS ? stickCmd[1][0] : 0) / (maxSps() * joyScale), (millis() - stickMs[1] < DEADMAN_MS ? stickCmd[1][1] : 0) / (maxSps() * joyScale),
+    pan.v * sgn(pan) / STEPS_PER_TURN, tilt.v * sgn(tilt) / STEPS_PER_TURN);
   web.send(200, "application/json", b);
 }
 
@@ -581,13 +604,14 @@ void webSetup() {
   web.on("/s", sendStatus);
   web.on("/tune", []() { web.sendHeader("Cache-Control", "no-store"); web.send_P(200, "text/html", TUNE); });
   web.on("/j", []() {                                   // joystick: x, y from -1 to 1
+    { char n[40]; snprintf(n, sizeof n, "/j x=%s y=%s", web.arg("x").c_str(), web.arg("y").c_str()); reqNote(n); }
     joyInput(web.arg("x").toFloat(), web.arg("y").toFloat(), 0);
     sendStatus();
   });
   web.on("/stop", []() { ev("STOP pressed on the page"); stopAll(); manualUntil = millis() + MANUAL_HOLD_MS; sendStatus(); });
   web.on("/trk", []() { trackingOn = !trackingOn; ev("tracking %s on the page", trackingOn ? "ALLOWED" : "BLOCKED"); if (!trackingOn) pan.viscaCmd = tilt.viscaCmd = 0; sendStatus(); });
   web.on("/log", []() {
-    String t; t.reserve(NEV * 76 + 80);
+    String t; t.reserve(NEV * 70 + 80);
     uint32_t u = millis() / 1000;
     t += "Head build "; t += FW_BUILD; t += ", running for "; t += String(u / 3600); t += " h "; t += String(u / 60 % 60); t += " min. Newest first; times are since power-up.\n";
     for (int i = 0; i < evCount; i++) { t += evBuf[(evHead - 1 - i + NEV) % NEV]; t += '\n'; }
@@ -610,6 +634,7 @@ void webSetup() {
   });
   web.on("/lim", []() {                                 // a = p|t, e = l|r|u|d (set that end here) or c (clear)
     Axis &x = web.arg("a") == "p" ? pan : tilt; String e = web.arg("e");
+    { char n[40]; snprintf(n, sizeof n, "/lim a=%s e=%s", web.arg("a").c_str(), e.c_str()); reqNote(n); }
     if (x.st) {
       long pos = x.st->getCurrentPosition();
       if (e == "c") x.hasLo = x.hasHi = false;
@@ -620,6 +645,7 @@ void webSetup() {
         else           { x.lo = pos; x.hasLo = true; if (x.hasHi && x.hi < pos) x.hasHi = false; }
       }
       saveLimits(x);
+      ev("%s limit %s at %ld: lo %ld%c hi %ld%c inv %d", x.name, e.c_str(), pos, x.lo, x.hasLo ? '*' : ' ', x.hi, x.hasHi ? '*' : ' ', (int)x.invert);
     }
     sendStatus();
   });
@@ -643,6 +669,21 @@ void webSetup() {
       else if (!web.hasArg("name")) recallPreset(n);
     }
     sendStatus();
+  });
+  web.on("/diag", []() {                                // everything about why the head is or is not moving, as text to copy
+    static const char *WHY[] = {"idle (no command)", "moving", "no stepper", "REFUSED: motors off", "driving to a preset / map point", "REFUSED: at the motor's HIGH limit", "REFUSED: at the motor's LOW limit", "starting / stopping"};
+    String t; t.reserve(1900); char l[200]; uint32_t now = millis();
+    snprintf(l, sizeof l, "X70 head build %d, up %lu s. motors %s, tracking %s, manual hold %ld ms, OBS %s, top %d RPM, slow cap %d RPM\n", FW_BUILD, now / 1000, motorsOn ? "ON" : "OFF", trackingOn ? "allowed" : "blocked", (long)(int32_t)(manualUntil - now), (viscaClient && viscaClient.connected()) ? "connected" : "not connected", (int)maxRpm, (int)SLOW_CAP_RPM); t += l;
+    for (int i = 0; i < 2; i++) {
+      Axis &x = *AX[i];
+      long pos = x.st ? x.st->getCurrentPosition() : 0;
+      snprintf(l, sizeof l, "%s: %s\n  wanted %.0f steps/s (as you see it), asked of motor %.0f, speed now %.0f, running %d, driver %s, flip %d, gear %.2f\n", x.name, WHY[whyCode[i]], tWant[i], tTarget[i], x.v, x.st ? (int)x.st->isRunning() : -1, x.found ? "answering" : "NOT answering", (int)x.invert, x.gear); t += l;
+      snprintf(l, sizeof l, "  motor position %ld steps. motor low limit %s %ld, motor high limit %s %ld, cap %.0f steps/s\n  commands: page-or-box stick %.0f, OBS %.0f, preset move %d\n", pos, x.hasLo ? "SET" : "none", x.lo, x.hasHi ? "SET" : "none", x.hi, capSps(x), x.webCmd, x.viscaCmd, (int)x.going); t += l;
+    }
+    snprintf(l, sizeof l, "sticks: page pan %.0f tilt %.0f (last heard %ld ms ago, %lu packets), box pan %.0f tilt %.0f (last heard %ld ms ago, %lu packets)\n", stickCmd[0][0], stickCmd[0][1], stickMs[0] ? (long)(now - stickMs[0]) : -1L, (unsigned long)stickCount[0], stickCmd[1][0], stickCmd[1][1], stickMs[1] ? (long)(now - stickMs[1]) : -1L, (unsigned long)stickCount[1]); t += l;
+    snprintf(l, sizeof l, "Wi-Fi %d dBm, free memory %d KB, longest pause of the head's own loop %lu ms, page requests %lu\nlast requests (seconds since power-up):\n", (int)WiFi.RSSI(), (int)(ESP.getFreeHeap() / 1024), (unsigned long)loopMaxMs, (unsigned long)httpCount); t += l;
+    for (int i = 0; i < 10; i++) { const char *r = reqLog[(reqHead + i) % 10]; if (r[0]) { t += "  "; t += r; t += '\n'; } }
+    web.sendHeader("Cache-Control", "no-store"); web.send(200, "text/plain", t);
   });
   web.on("/go", []() {                                  // aim at a spot on the stage map: p, t in motor turns from centre, as the user sees them
     if (pan.st && tilt.st) {
@@ -772,6 +813,7 @@ void loop() {
   static uint32_t lastTick = 0, lastPass = 0, lastBusyEv = 0;
   uint32_t now = millis();
   if (lastPass != 0 && now - lastPass > 250 && (lastBusyEv == 0 || now - lastBusyEv > 5000)) { lastBusyEv = now; ev("head was busy for %u ms (nothing heard meanwhile)", (unsigned)(now - lastPass)); }
+  if (lastPass != 0 && now - lastPass > loopMaxMs) loopMaxMs = now - lastPass;
   lastPass = now;
   if (now - lastTick >= 10) { float dt = (now - lastTick) * 0.001f; if (dt > 0.05f) dt = 0.05f; lastTick = now; motionTick(dt); }
   web.handleClient();

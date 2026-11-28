@@ -51,6 +51,7 @@ button:active{filter:brightness(1.25)}button:focus-visible,input:focus-visible{o
 background:radial-gradient(circle,#232a35 0,#161a21 68%,#11141a 100%);border:1px solid var(--ln);box-shadow:inset 0 0 0 10px #0f1217,inset 0 0 24px #000}
 .pad::before,.pad::after{content:"";position:absolute;background:var(--ln)}.pad::before{left:50%;top:14%;bottom:14%;width:1px}.pad::after{top:50%;left:14%;right:14%;height:1px}
 .kn{width:34%;height:34%;border-radius:50%;position:absolute;left:33%;top:33%;pointer-events:none;z-index:1;background:radial-gradient(circle at 35% 30%,#ffd08a,var(--ac) 55%,#b87416);box-shadow:0 6px 18px #000a}
+.tr{min-height:20px;text-align:center;font-size:13px;color:var(--dm);margin:-4px 0 8px}.tr.b{color:var(--bad);font-weight:600}.tr.g{color:var(--ok)}
 .sg{display:grid;grid-template-columns:repeat(3,1fr);background:var(--bg);border:1px solid var(--ln);border-radius:12px;padding:3px}
 .sg button{border:0;background:none;padding:9px 4px;border-radius:9px;color:var(--dm);font-size:13px}.sg button.on{background:var(--s2);color:var(--tx);box-shadow:0 0 0 1px var(--ln)}
 /* presets */
@@ -126,7 +127,7 @@ nav a svg{display:block;margin:0 auto 2px;width:22px;height:22px;fill:none;strok
 <div id="mape" hidden><span>The map shows where the camera can aim once its travel limits are set.</span><button class="pr" onclick="wzOpen()">Start guided setup</button></div></div></div>
 
 <div class="c"><div class="ch"><span class="lb">Joystick</span><small id="jh"></small></div>
-<div id="pad" class="pad"><div class="kn"></div></div>
+<div id="pad" class="pad"><div class="kn"></div></div><div class="tr"></div>
 <div class="sg" id="feel"><button data-v="0.2">Precise</button><button data-v="0.5">Normal</button><button data-v="1">Fast</button></div></div>
 
 <div class="c"><div class="ch"><span class="lb">Presets</span><small>tap to go · ⋯ to edit</small></div><div id="pr"></div></div>
@@ -157,6 +158,7 @@ nav a svg{display:block;margin:0 auto 2px;width:22px;height:22px;fill:none;strok
 <button class="sw" id="au" role="switch" style="margin-top:12px"><span><b>Update automatically</b><small>Installs new builds when the head is idle.</small></span><span class="tg"></span></button></div>
 <div class="c"><div class="ch"><span class="lb">Network</span></div><dl id="nw"></dl><button class="lk" onclick="location.href='/wifi'">Wi-Fi networks and password</button></div>
 <div class="c"><details id="evd"><summary><span class="lb">Recent events</span></summary><pre id="evt">loading…</pre><div class="row"><button onclick="evLoad()">Refresh</button><button onclick="evSel()">Select all to copy</button></div></details></div>
+<div class="c"><details id="dgd"><summary><span class="lb">Diagnostics</span></summary><pre id="dgt">loading…</pre><div class="row"><button onclick="dgLoad()">Refresh</button><button onclick="evSel('dgt')">Select all to copy</button></div></details></div>
 <div class="c"><button class="sw" id="mo" role="switch"><span><b>Motors powered</b><small>Off lets you move the camera by hand. It may sag.</small></span><span class="tg"></span></button></div>
 </section>
 </div>
@@ -167,6 +169,7 @@ nav a svg{display:block;margin:0 auto 2px;width:22px;height:22px;fill:none;strok
 <a href="#system" data-t="system"><svg viewBox="0 0 24 24"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg><span>System<em id="nh" hidden></em></span></a></nav></div></div>
 
 <script>
+var N={sent:0,ok:0,fail:0,ms:0,last:0,err:''},pushT=0;
 var X=0,Y=0,act=false,busy=false,hold=0,S={},last=0,idle=0,U=null,W=null,NS='http://www.w3.org/2000/svg';
 function $(i){return document.getElementById(i)}
 function esc(t){return String(t).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
@@ -265,7 +268,21 @@ if($('hl').dataset.h!=hh){$('hl').innerHTML=hh;$('hl').dataset.h=hh}$('hls').tex
 var up=s.up||0;$('fw').innerHTML='<dt>Head</dt><dd class="n">build '+s.fw+'</dd><dt>Joystick box</dt><dd class="n">'+(s.jon?'build '+s.jfw:'not seen')+'</dd><dt>Newest on GitHub</dt><dd class="n">'+(s.lat<0?'not checked yet':'build '+s.lat)+'</dd>'+(s.msg?'<dt>Note</dt><dd>'+esc(s.msg)+'</dd>':'');
 $('nw').innerHTML='<dt>Head address</dt><dd class="n">'+esc(s.ip)+'</dd><dt>Joystick box</dt><dd class="n">'+(s.jip?esc(s.jip):'not seen')+'</dd><dt>Wi-Fi signal</dt><dd>'+(s.rssi>=-60?'strong':s.rssi>=-70?'good':s.rssi>=-80?'weak':'very weak')+'</dd><dt>Running for</dt><dd class="n">'+Math.floor(up/3600)+' h '+Math.floor(up/60%60)+' min</dd>';
 $('ck').hidden=!s.chk;$('au').setAttribute('aria-checked',!!s.auto);$('mo').setAttribute('aria-checked',!!s.on);
-if(!U&&s.ust>0)U={from:s.fw,target:0,jon:!!s.jon,t0:Date.now(),step:2,end:''};if(U)upDraw(s);if(W)wzLive()}
+if(!U&&s.ust>0)U={from:s.fw,target:0,jon:!!s.jon,t0:Date.now(),step:2,end:''};if(U)upDraw(s);if(W)wzLive();trace()}
+// ---- live trace under every stick: what you ask, what the head has, and what it does about it
+function trace(){var e=document.querySelectorAll('.tr'),s=S,t='',c='';if(!s.why){return}
+var push=Math.abs(X)>.08||Math.abs(Y)>.08;if(push){if(!pushT)pushT=Date.now()}else pushT=0;
+var W=['','moving','no motor on this axis','REFUSED: the motors are off','busy driving to a preset','REFUSED: limit','REFUSED: limit','starting'];
+function ax(i,v){var w=s.why[i],nm=i?(v>0?'up':'down'):(v>0?'right':'left'),r;
+if(w==5||w==6){var hi=(w==5)!=!!s.inv[i];r='REFUSED: the '+(i?(hi?'up':'down'):(hi?'right':'left'))+' limit is here ('+pos(i,s.lv[i*2+(hi?1:0)])+', now '+pos(i,i?s.tt:s.pt)+')';c='b'}
+else if(w==1||w==7){var d=dps(i,Math.abs(s.vn[i])*60);r=(w==7?'starting ':'moving ')+(s.vn[i]>0?(i?'up':'right'):(i?'down':'left'))+(d?' '+d.toFixed(1)+'°/s':'');if(!c)c='g'}
+else if(w==3){r=W[3];c='b'}else if(w==0)r='head sees no command';else r=W[w];return (i?'Tilt ':'Pan ')+nm+': '+r}
+if(push){var got=Math.abs(s.sk[0])>.001||Math.abs(s.sk[1])>.001||Math.abs(X)<.1&&Math.abs(Y)<.1,a=[];
+if(!got&&Date.now()-pushT>700){t='The head is not getting this stick: '+N.sent+' sent, '+N.ok+' answered, '+N.fail+' failed'+(N.err?' ('+N.err+')':'')+', last answer '+(N.last?((Date.now()-N.last)/1000).toFixed(1)+' s ago':'never');c='b'}
+else{if(Math.abs(X)>.08)a.push(ax(0,X));if(Math.abs(Y)>.08)a.push(ax(1,Y));t=a.join(' · ')}}
+else if(Math.abs(s.sk[2])>.001||Math.abs(s.sk[3])>.001)t='The joystick box is driving';
+else if(s.why[0]==4||s.why[1]==4)t='Driving to a preset';
+[].forEach.call(e,function(x){x.textContent=t;x.className='tr '+c})}
 // ---- tabs
 function go(t){location.hash=t}
 function tab(){var t=(location.hash||'#control').slice(1);if(!$('t-'+t))t='control';['control','setup','system'].forEach(function(k){$('t-'+k).hidden=k!=t});[].forEach.call(document.querySelectorAll('nav a'),function(a){a.className=a.dataset.t==t?'on':''});scrollTo(0,0)}
@@ -288,7 +305,7 @@ function wzOpen(i){W={i:i||0,s:0};$('wz').hidden=false;wzDraw()}
 function wzGo(d){AU=0;X=Y=0;W.i=Math.max(0,Math.min(6,W.i+d));W.s=0;W.m=null;wzDraw()}
 $('wzx').onclick=function(){AU=0;X=Y=0;W=null;$('wz').hidden=true};$('wzk').onclick=function(){AU=0;X=Y=0;if(W.s>0){W.s--;wzDraw()}else wzGo(-1)};
 function wzSet(h,f){$('wzb').innerHTML=h+'<div class="wzf">'+f+'</div>';var p=$('wzb').querySelector('.pad');if(p)padOn(p);$('wzbar').style.width=(W.i/6*100)+'%';$('wzk').style.visibility=W.i||W.s?'visible':'hidden';$('wz').scrollTop=0;wzLive()}
-var PAD='<div class="pad"><div class="kn"></div></div>',NX='<button class="pr" onclick="wzGo(1)">',SK='<button class="gh" onclick="wzGo(1)">Skip for now</button>';
+var PAD='<div class="pad"><div class="kn"></div></div><div class="tr"></div>',NX='<button class="pr" onclick="wzGo(1)">',SK='<button class="gh" onclick="wzGo(1)">Skip for now</button>';
 function wzDraw(){var k=WZ[W.i],s=S;
 if(k=='dir'){var up=W.s==1;wzSet('<span class="lb">Step 1 of 6 · Directions</span><h2>Push the stick '+(up?'UP':'to the RIGHT')+' and watch the camera.</h2><p>Did the camera '+(up?'tilt up':'turn to its right, as seen from behind it')+'?</p>'+PAD,
 '<button class="pr" onclick="wzDir(0)">Yes, it went '+(up?'up':'right')+'</button><button onclick="wzDir(1)">No, it went '+(up?'down':'left')+': fix it</button>')}
@@ -347,12 +364,13 @@ $('ux').hidden=!U.end;if(U.end=='ok'&&$('u6').className=='us now'){$('ut').textC
 $('ux').onclick=function(){U=null;$('up').hidden=true;try{sessionStorage.removeItem('x70up')}catch(e){}};
 // ---- the rest of the controls
 function evLoad(){fetch('/log').then(function(r){return r.text()}).then(function(t){$('evt').textContent=t}).catch(function(){$('evt').textContent='could not load'})}
-function evSel(){var r=document.createRange();r.selectNodeContents($('evt'));var s=getSelection();s.removeAllRanges();s.addRange(r)}
-$('evd').ontoggle=function(){if(this.open)evLoad()};
+function dgLoad(){fetch('/diag').then(function(r){return r.text()}).then(function(t){$('dgt').textContent=t+'page: stick requests '+N.sent+' sent, '+N.ok+' answered, '+N.fail+' failed'+(N.err?' ('+N.err+')':'')+', last reply took '+N.ms+' ms\n'+navigator.userAgent}).catch(function(){$('dgt').textContent='could not load'})}
+function evSel(i){var r=document.createRange();r.selectNodeContents($(i||'evt'));var s=getSelection();s.removeAllRanges();s.addRange(r)}
+$('evd').ontoggle=function(){if(this.open)evLoad()};$('dgd').ontoggle=function(){if(this.open)dgLoad()};
 $('stop').onclick=function(){if(AU)wzAuto();X=Y=0;q('/stop')};$('trk').onclick=function(){q('/trk')};$('au').onclick=function(){q('/set?auto=1')};
 $('mo').onclick=function(){if(S.on)ask('Switch the motors off?','The camera is no longer held and may sag forward. Hold it if it is front-heavy.','Switch off',function(){q('/en?on=0')});else q('/en?on=1')};
 $('max').onchange=function(){q('/set?max='+this.value)};$('jsc').onchange=function(){q('/set?jsc='+this.value)};$('ramp').onchange=function(){q('/set?ramp='+this.value)};
-setInterval(function(){if(busy||hold)return;var mvg=act||X||Y;if(mvg||last){busy=true;last=mvg?1:0;var c=new AbortController(),t=setTimeout(function(){c.abort()},2500);fetch('/j?x='+X.toFixed(3)+'&y='+Y.toFixed(3),{signal:c.signal}).then(function(r){return r.json()}).then(show).catch(function(){}).then(function(){clearTimeout(t);busy=false})}
+setInterval(function(){if(busy||hold)return;var mvg=act||X||Y;if(mvg||last){busy=true;last=mvg?1:0;var c=new AbortController(),t=setTimeout(function(){c.abort()},2500);var t0=Date.now();N.sent++;fetch('/j?x='+X.toFixed(3)+'&y='+Y.toFixed(3),{signal:c.signal}).then(function(r){return r.json()}).then(function(s){N.ok++;N.ms=Date.now()-t0;N.last=Date.now();show(s)}).catch(function(e){N.fail++;N.err=String(e&&e.name||e)}).then(function(){clearTimeout(t);busy=false;trace()})}
 else if(++idle>=(W?3:10)){idle=0;q('/s')}},100);
 </script></body></html>)HTML";
 
