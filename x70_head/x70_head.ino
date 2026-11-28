@@ -650,9 +650,11 @@ Password<input id="pw" type="password" autocomplete="off">
 <button id="rec">Load the recommended settings for this shot</button>
 <h3>2. Fix what you see</h3>
 <button data-fix="calm">Camera swings past the person and back &rarr; make it calmer</button>
-<button data-fix="fast">Camera lags behind the person &rarr; make it quicker</button>
-<button data-fix="still">Camera twitches when the person barely moves &rarr; make it steadier</button>
-<button data-fix="tight">Person drifts too far off-centre before it moves &rarr; make it tighter</button>
+<button data-fix="fast">Camera is slow to bring the person back &rarr; make it quicker</button>
+<button data-fix="still">Camera moves when the person only shifts a little &rarr; bigger rest zone</button>
+<button data-fix="tight">Person gets too far off-centre before it moves &rarr; smaller rest zone</button>
+<button data-fix="late">Camera follows after the person instead of with them &rarr; more anticipation</button>
+<button data-fix="ahead">Camera runs ahead of the person or hunts &rarr; less anticipation</button>
 <h3>3. Framing and speed</h3><div id="sl"></div>
 <details><summary>More settings (rarely needed)</summary><div id="sl2"></div>
 <button id="ix"></button><button id="iy"></button></details>
@@ -663,9 +665,12 @@ var $=function(i){return document.getElementById(i)},H={},ws=null,rid=0,cb={},SR
 var P=[['track_y','Head room: face higher or lower',-0.5,0.5,0.01,'',0.15,0.35,'face near the middle, a lot of space above','face near the top edge',1],
 ['Kp_x_db','Pan speed',20,80,1,' dB',0,0,'slow, may lag behind','fast, may swing past the person',1],
 ['Kp_y_db','Tilt speed',20,80,1,' dB',0,0,'slow, may lag behind','fast, may bob up and down',1],
-['e_deadband_x','Still zone, left and right',0,20,0.5,' %',1,4,'follows every small move','person can sit far off-centre',1],
-['e_deadband_y','Still zone, up and down',0,20,0.5,' %',3,8,'bobs when the person nods','slow to follow up and down',1],
-['lock_hold','Stay on the same person when the face is hidden',1,60,1,' s',5,15,'may jump to someone else quickly','may follow nothing for a while',1],
+['zone_x','Rest zone, left and right',2,40,1,' %',8,15,'follows every small move','person can sit far off-centre',1],
+['zone_y','Rest zone, up and down',2,40,1,' %',8,15,'bobs when the person nods','slow to follow up and down',1],
+['zone_anticipation','Move with the person',0,1.2,0.05,'',0.7,1.05,'follows after the person has moved','may run ahead or hunt',1],
+['lock_hold','Stay on the same person while hidden',1,60,1,' s',5,15,'may jump to someone else quickly','may follow nothing for a while',1],
+['e_deadband_x','Still zone, left and right (zone framing off)',0,20,0.5,' %',1,4,'follows every small move','person can sit far off-centre',0],
+['e_deadband_y','Still zone, up and down (zone framing off)',0,20,0.5,' %',3,8,'bobs when the person nods','slow to follow up and down',0],
 ['track_x','Face left or right in the picture',-0.5,0.5,0.01,'',-0.1,0.1,'person sits left','person sits right',0],
 ['e_nonlinear_x','Soft edge of still zone, left and right',0,20,0.5,' %',2,6,'starts abruptly','vague, slow to start',0],
 ['e_nonlinear_y','Soft edge of still zone, up and down',0,20,0.5,' %',4,8,'starts abruptly','vague, slow to start',0],
@@ -731,7 +736,7 @@ P.forEach(function(p){var g=good(p);h[p[10]?0:1]+='<label>'+p[1]+' <b id="v_'+p[
 P.forEach(function(p){var e=$('s_'+p[0]);e.oninput=function(){var v=+e.value;show1(p,v);setv(p[0],v)}});paint()}
 function show1(p,v){var g=good(p);$('v_'+p[0]).innerHTML=fmt(p,v)+note(p,v);$('n_'+p[0]).textContent='Good: '+fmt(p,g[0])+' to '+fmt(p,g[1])}
 function nudge(k,d){var p=P.filter(function(x){return x[0]==k})[0],v=Math.max(p[2],Math.min(p[3],(+FS[k]||0)+d));setv(k,v);$('s_'+k).value=v;show1(p,v)}
-var FIX={calm:[['Kp_x_db',-3],['Kp_y_db',-3]],fast:[['Kp_x_db',3],['Kp_y_db',3]],still:[['e_deadband_x',1],['e_deadband_y',1]],tight:[['e_deadband_x',-1],['e_deadband_y',-1]]};
+var FIX={calm:[['Kp_x_db',-3],['Kp_y_db',-3]],fast:[['Kp_x_db',3],['Kp_y_db',3]],still:[['zone_x',2],['zone_y',2]],tight:[['zone_x',-2],['zone_y',-2]],late:[['zone_anticipation',0.1]],ahead:[['zone_anticipation',-0.15]]};
 Array.prototype.forEach.call(document.querySelectorAll('[data-fix]'),function(b){b.onclick=function(){FIX[b.dataset.fix].forEach(function(f){nudge(f[0],f[1])});os('Changed. Watch the camera for a minute before changing it again.')}});
 $('shot').onchange=function(){KP=base();if(SRC)paint()};
 function paint(){KP=base();P.forEach(function(p){var v=FS[p[0]];if(v===undefined)v=0;$('s_'+p[0]).value=v;show1(p,+v)});
@@ -741,7 +746,7 @@ $('en').onclick=function(){var v=!FS._en;req('SetSourceFilterEnabled',{sourceNam
 $('ix').onclick=function(){setv('invert_x',!FS.invert_x);paint()};$('iy').onclick=function(){setv('invert_y',!FS.invert_y);paint()};
 // Start values: loop gain about 1 per second for the chosen shot width, the OBS frame rate and the head's speed scale.
 function rec(){var fov=+$('shot').value,s=+(H.tsc||0.2),kp=base();KP=kp;
-var v={Kp_x_db:kp,Kp_y_db:Math.max(20,kp-3),e_deadband_x:2,e_nonlinear_x:4,e_deadband_y:4,e_nonlinear_y:6,track_x:0,track_y:fov<8?0.2:0.25,Ki_x:0.2,Ki_y:0.2,Td_x:0.25,Td_y:0.25,Tdlpf:2,track_fps:12,lock_hold:10,detect_interval:1,e_deadband_z:50,Ki_z:0,Td_z:0,Kp_z_db:-40};
+var v={Kp_x_db:kp,Kp_y_db:Math.max(20,kp-3),e_deadband_x:2,e_nonlinear_x:4,e_deadband_y:4,e_nonlinear_y:6,track_x:0,track_y:fov<8?0.2:0.25,Ki_x:0.2,Ki_y:0.2,Td_x:0.25,Td_y:0.25,Tdlpf:2,track_fps:12,lock_hold:10,detect_interval:1,zone_mode:true,zone_x:10,zone_y:10,zone_anticipation:1,e_deadband_z:50,Ki_z:0,Td_z:0,Kp_z_db:-40};
 Object.assign(FS,v);req('SetSourceFilterSettings',{sourceName:SRC,filterName:FLT,filterSettings:v,overlay:true}).then(function(){paint();os('Recommended settings loaded for this shot.')},function(e){os('OBS error: '+e)})}
 $('rec').onclick=rec;$('go').onclick=connect;
 try{var sv=JSON.parse(localStorage.getItem('x70obs')||'null');if(sv){$('ip').value=sv.ip;$('port').value=sv.port;$('pw').value=sv.pw}}catch(e){}
