@@ -514,7 +514,7 @@ button{background:#2a313b;color:#e8ecf1;border:1px solid #3a4452;border-radius:1
 button:active{background:#3a4452}.g{display:grid;grid-template-columns:repeat(3,1fr)}.g2{display:grid;grid-template-columns:repeat(2,1fr)}
 #stop{background:#b3261e;border-color:#b3261e;font-weight:700;width:100%;padding:14px}
 .on{background:#1f5f3a}.sv{background:#8a6d1a}
-#st{font-size:13px;color:#9aa5b4;min-height:54px;white-space:pre-line}
+#st{font-size:13px;color:#9aa5b4;min-height:72px;white-space:pre-line}
 h3{margin:16px 0 4px;font-size:13px;color:#9aa5b4;text-transform:uppercase;letter-spacing:.08em}
 label{display:block;margin:10px 0 2px;font-size:13px;color:#cfd6df}input[type=range]{width:100%}
 input[type=number]{width:80px;background:#222830;color:#e8ecf1;border:1px solid #3a4452;border-radius:8px;padding:8px;font-size:15px}
@@ -573,7 +573,7 @@ pad.onpointerdown=function(e){act=true;pad.setPointerCapture(e.pointerId);mv(e)}
 pad.onpointermove=function(e){if(act)mv(e)};
 pad.onpointerup=pad.onpointercancel=function(){act=false;X=Y=0;setK()};
 function show(s){S=s;var t=(s.gp>0?'Pan '+s.pd.toFixed(1)+'°':'Pan '+s.pt.toFixed(2)+' motor turns')+'   '+(s.gt>0?'Tilt '+s.td.toFixed(1)+'°':'Tilt '+s.tt.toFixed(2)+' motor turns');
-t+='\n'+(s.src==3?'OBS is sending commands: IGNORED, tracking is blocked':s.src==2?'OBS face tracking is moving the head':s.src==1?'Joystick':(s.on?'Holding':'No commands'))+(s.on?'':' (MOTORS OFF)')+'   Wi-Fi signal: '+(s.rssi>=-60?'strong':s.rssi>=-70?'good':s.rssi>=-80?'weak':'very weak');t+='\nHead '+s.ip+'   Joystick '+(s.jip||'not seen');$('st').textContent=t;
+t+='\n'+(s.src==3?'OBS is sending commands: IGNORED, tracking is blocked':s.src==2?'OBS face tracking is moving the head':s.src==1?'Joystick':(s.on?'Holding still':'No commands'))+(s.on?'':' (MOTORS OFF)')+'\n'+(s.obs?(s.trk?'OBS is connected'+(s.src==2||s.src==1?'':': waiting for a face to move away from the target'):'OBS is connected but tracking is BLOCKED'):'OBS is NOT connected to the head')+'   Wi-Fi signal: '+(s.rssi>=-60?'strong':s.rssi>=-70?'good':s.rssi>=-80?'weak':'very weak');t+='\nHead '+s.ip+'   Joystick '+(s.jip||'not seen');$('st').textContent=t;
 var w='';if(!s.dp)w+='Pan driver not answering. ';if(!s.dt)w+='Tilt driver not answering. ';if(!s.pl)w+='Pan limits not set (slow). ';if(!s.tl)w+='Tilt limits not set (slow). ';$('warn').textContent=w;
 if(document.activeElement!=$('max')){$('max').value=s.max}$('mv').textContent=s.max+' RPM motor (limit for joystick, presets and tracking)';
 if(document.activeElement!=$('jsc')){$('jsc').value=s.jsc}$('jv').textContent=Math.round(s.jsc*100)+' % of top speed with the stick fully over';
@@ -757,11 +757,11 @@ void sendStatus() {
   char b[980]; String ipS = WiFi.localIP().toString(), jipS = (joySeenMs != 0 && millis() - joySeenMs < 6000) ? joyIP.toString() : String("");
   snprintf(b, sizeof b,
     "{\"on\":%d,\"trk\":%d,\"src\":%d,\"pd\":%.2f,\"td\":%.2f,\"pt\":%.3f,\"tt\":%.3f,\"gp\":%.2f,\"gt\":%.2f,\"pl\":%d,\"tl\":%d,\"dp\":%d,\"dt\":%d,"
-    "\"max\":%d,\"ramp\":%.1f,\"tsc\":%.2f,\"tramp\":%.1f,\"rssi\":%d,\"ps\":[%d,%d,%d,%d,%d,%d],\"fw\":%d,\"auto\":%d,\"lat\":%d,\"jfw\":%d,\"jon\":%d,\"ip\":\"%s\",\"jip\":\"%s\",\"ust\":%d,\"upc\":%d,\"utry\":%d,\"chk\":%d,\"jsc\":%.2f,\"heap\":%d,\"blk\":%d,\"msg\":\"%s\"}",
+    "\"max\":%d,\"ramp\":%.1f,\"tsc\":%.2f,\"tramp\":%.1f,\"rssi\":%d,\"ps\":[%d,%d,%d,%d,%d,%d],\"fw\":%d,\"auto\":%d,\"lat\":%d,\"jfw\":%d,\"jon\":%d,\"ip\":\"%s\",\"jip\":\"%s\",\"ust\":%d,\"upc\":%d,\"utry\":%d,\"chk\":%d,\"obs\":%d,\"jsc\":%.2f,\"heap\":%d,\"blk\":%d,\"msg\":\"%s\"}",
     motorsOn, trackingOn, src, stepsToDeg(pan, pp), stepsToDeg(tilt, tp), pp / STEPS_PER_TURN, tp / STEPS_PER_TURN, pan.gear, tilt.gear,
     limited(pan), limited(tilt), pan.found, tilt.found, (int)maxRpm, ramp, trackScale, trackRamp, (int)WiFi.RSSI(),
     presetSet[0], presetSet[1], presetSet[2], presetSet[3], presetSet[4], presetSet[5],
-    FW_BUILD, autoUpdate, latestBuild, joyBuild, (int)(joySeenMs != 0 && millis() - joySeenMs < 6000), ipS.c_str(), jipS.c_str(), updMode ? (updStage ? (int)updStage : 1) : 0, (int)updPct, (int)updTry, chkState == 1, joyScale, (int)(ESP.getFreeHeap() / 1024), (int)(ESP.getMaxAllocHeap() / 1024), fwMsg.c_str());
+    FW_BUILD, autoUpdate, latestBuild, joyBuild, (int)(joySeenMs != 0 && millis() - joySeenMs < 6000), ipS.c_str(), jipS.c_str(), updMode ? (updStage ? (int)updStage : 1) : 0, (int)updPct, (int)updTry, chkState == 1, (int)((viscaClient && viscaClient.connected()) || (viscaLastMs != 0 && now - viscaLastMs < 3000)), joyScale, (int)(ESP.getFreeHeap() / 1024), (int)(ESP.getMaxAllocHeap() / 1024), fwMsg.c_str());
   web.send(200, "application/json", b);
 }
 
