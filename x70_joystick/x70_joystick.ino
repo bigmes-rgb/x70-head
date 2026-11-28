@@ -113,6 +113,18 @@ bool pressed(Btn &b) {
   return true;
 }
 
+const char WAITPAGE[] PROGMEM = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>X70</title>
+<style>body{margin:0;background:#14171c;color:#e8ecf1;font:16px -apple-system,Segoe UI,Roboto,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center}
+.c{width:min(88vw,360px);background:#1b2027;border:1px solid #3a4452;border-radius:16px;padding:22px}h2{margin:0 0 12px;font-size:18px;display:flex;gap:10px;align-items:center}
+i{width:18px;height:18px;border-radius:50%;border:2px solid #4fc3f7;border-top-color:transparent;animation:s .8s linear infinite;flex:none}
+p{color:#9aa5b4;font-size:14px;line-height:1.45}@keyframes s{to{transform:rotate(360deg)}}</style>
+<div class=c><h2><i></i><span>%HEAD%</span></h2><p id=m>This page comes back by itself. Nothing to do.</p><p id=n hidden>%NOTE%</p></div>
+<script>var t0=Date.now(),g=function(i){return document.getElementById(i)};setTimeout(function k(){var c=new AbortController();setTimeout(function(){c.abort()},2000);
+fetch('%PING%',{signal:c.signal,cache:'no-store'}).then(function(r){if(r.ok)location.replace('/');else throw 0}).catch(function(){var s=Math.round((Date.now()-t0)/1000);
+g('m').textContent='Waiting for it to come back: '+s+' s';if(s>%LATE%)g('n').hidden=false;setTimeout(k,2000)})},6000)</script>)HTML";
+String waitPage(const char *head, const char *note, const char *ping, int late) {
+  String h = FPSTR(WAITPAGE); h.replace("%HEAD%", head); h.replace("%NOTE%", note); h.replace("%PING%", ping); h.replace("%LATE%", String(late)); return h;
+}
 bool joinSavedWifi() {                         // two remembered networks: joins whichever is in range, the stronger one first
   const String *ss[2] = {&wifiSsid, &wifiSsid2}, *pp[2] = {&wifiPass, &wifiPass2};
   if (!wifiSsid.length() && !wifiSsid2.length()) return false;
@@ -204,10 +216,10 @@ void setup() {
     if (s.length()) { prefs.putString("ssid", s); if (p.length() || s != wifiSsid) prefs.putString("wpass", p); }
     if (web.hasArg("s2")) { prefs.putString("ssid2", s2); if (p2.length() || s2 != wifiSsid2) prefs.putString("wpass2", p2); }   // empty name = forget network 2
     if (d.length() >= 8) prefs.putString("dpass", d);
-    web.send(200, "text/html", "<body style='font:16px sans-serif;padding:16px'>Saved. The box is restarting and will join that Wi-Fi. If it cannot, it brings back its own X70-Joystick Wi-Fi.");
+    web.send(200, "text/html", waitPage("Saved. The joystick box is restarting", "Still not back? If you moved it to a different Wi-Fi, put this phone or PC on that Wi-Fi and open x70joystick.local. If the name or password was wrong, join the Wi-Fi called X70-Joystick and open 192.168.4.1 to correct it.", "/", 45));
     delay(800); ESP.restart();
   });
-  web.on("/fwgo", []() { updateRequested = true; web.send(200, "text/html", "<body style='font:16px sans-serif;padding:16px'>Updating. The box restarts in about a minute. <a href='/'>Back</a>"); });
+  web.on("/fwgo", []() { updateRequested = true; web.send(200, "text/html", waitPage("Updating the joystick box", "This is taking longer than normal. Leave it powered, then open x70joystick.local again.", "/", 150)); });
   webUpdater.setup(&web, "/update", "admin", devPass.c_str());
   web.begin();
 }

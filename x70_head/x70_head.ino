@@ -368,14 +368,29 @@ void viscaPoll() {
 // ---------------- updates from GitHub ----------------
 bool headMoving() { for (Axis *x : AX) if (x->st && x->st->isRunning()) return true; return false; }
 
-void checkLatest() {                           // asks GitHub for the newest build number (takes a second or two)
-  WiFiClientSecure c; c.setInsecure();
-  HTTPClient h; h.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); h.setTimeout(8000);
-  if (h.begin(c, String(FW_BASE) + "version.txt")) {
-    int code = h.GET();
-    if (code == 200) { latestBuild = h.getString().toInt(); fwMsg = ""; } else fwMsg = "Could not reach GitHub (" + String(code) + ")";
-    h.end();
-  } else fwMsg = "Could not reach GitHub";
+// The check runs in the background so the page and the motors never wait for GitHub.
+volatile int chkState = 0;                     // 0 idle, 1 asking GitHub, 2 answer ready
+int chkBuild = -1; char chkErr[120] = ""; bool chkAuto = false;
+void checkTask(void *) {
+  chkErr[0] = 0; chkBuild = -1;
+  {
+    WiFiClientSecure c; c.setInsecure();
+    HTTPClient h; h.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); h.setConnectTimeout(8000); h.setTimeout(8000);
+    if (h.begin(c, String(FW_BASE) + "version.txt")) {
+      int code = h.GET();
+      if (code == 200) chkBuild = h.getString().toInt();
+      else { char tls[60] = ""; c.lastError(tls, sizeof tls); snprintf(chkErr, sizeof chkErr, "Could not reach GitHub (%s%s%s)", HTTPClient::errorToString(code).c_str(), tls[0] ? " / " : "", tls); }
+      h.end();
+    } else snprintf(chkErr, sizeof chkErr, "Could not reach GitHub");
+  }
+  for (char *q = chkErr; *q; q++) if (*q == '"') *q = '\'';
+  chkState = 2;
+  vTaskDelete(NULL);
+}
+void startCheck(bool automatic) {
+  if (chkState != 0) return;
+  chkAuto = automatic; chkState = 1;
+  if (xTaskCreate(checkTask, "check", 12288, NULL, 1, NULL) != pdPASS) { chkState = 0; fwMsg = "Could not check: the head is out of memory. Unplug its power for 5 seconds."; }
 }
 void sendText(IPAddress to, const char *msg, int port) { WiFiUDP u; u.beginPacket(to, port); u.write((const uint8_t *)msg, strlen(msg)); u.endPacket(); }
 void tellJoystick(const char *msg);
@@ -452,6 +467,18 @@ void joyBoxPoll() {
 }
 
 // ---------------- web page ----------------
+const char WAITPAGE[] PROGMEM = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>X70</title>
+<style>body{margin:0;background:#14171c;color:#e8ecf1;font:16px -apple-system,Segoe UI,Roboto,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center}
+.c{width:min(88vw,360px);background:#1b2027;border:1px solid #3a4452;border-radius:16px;padding:22px}h2{margin:0 0 12px;font-size:18px;display:flex;gap:10px;align-items:center}
+i{width:18px;height:18px;border-radius:50%;border:2px solid #4fc3f7;border-top-color:transparent;animation:s .8s linear infinite;flex:none}
+p{color:#9aa5b4;font-size:14px;line-height:1.45}@keyframes s{to{transform:rotate(360deg)}}</style>
+<div class=c><h2><i></i><span>%HEAD%</span></h2><p id=m>This page comes back by itself. Nothing to do.</p><p id=n hidden>%NOTE%</p></div>
+<script>var t0=Date.now(),g=function(i){return document.getElementById(i)};setTimeout(function k(){var c=new AbortController();setTimeout(function(){c.abort()},2000);
+fetch('%PING%',{signal:c.signal,cache:'no-store'}).then(function(r){if(r.ok)location.replace('/');else throw 0}).catch(function(){var s=Math.round((Date.now()-t0)/1000);
+g('m').textContent='Waiting for it to come back: '+s+' s';if(s>%LATE%)g('n').hidden=false;setTimeout(k,2000)})},6000)</script>)HTML";
+String waitPage(const char *head, const char *note, const char *ping, int late) {
+  String h = FPSTR(WAITPAGE); h.replace("%HEAD%", head); h.replace("%NOTE%", note); h.replace("%PING%", ping); h.replace("%LATE%", String(late)); return h;
+}
 const char PAGE[] PROGMEM = R"HTML(<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no"><title>X70 Head</title>
 <style>
@@ -476,6 +503,7 @@ details{margin-top:14px;text-align:left;background:#1b2027;border-radius:10px;pa
 .us.now{color:#e8ecf1}.us.now i{border-color:#4fc3f7;border-top-color:transparent;animation:sp .8s linear infinite}
 .us.ok{color:#9fdcb5}.us.ok i{background:#2e9d5b;border-color:#2e9d5b}.us.bad{color:#ff8a80}.us.bad i{background:#b3261e;border-color:#b3261e}
 .bar{flex-basis:100%;height:8px;background:#2a313b;border-radius:4px;overflow:hidden;margin-left:28px}.bar b{display:block;height:100%;width:0;background:#4fc3f7;transition:width .4s}
+.spin{display:inline-block;width:11px;height:11px;border-radius:50%;border:2px solid #4fc3f7;border-top-color:transparent;animation:sp .8s linear infinite;vertical-align:-2px}
 #um{font-size:13px;color:#9aa5b4;min-height:34px;margin:10px 0 6px}@keyframes sp{to{transform:rotate(360deg)}}
 </style></head><body><div id="up" hidden><div class="uc"><h2 id="ut"></h2>
 <div class="us" id="u1"><i></i>Restarting into update mode</div>
@@ -506,8 +534,8 @@ Pan <input id="gp" type="number" step="0.01"> Tilt <input id="gt" type="number" 
 <button id="mo" style="width:100%"></button>
 </details>
 <details><summary>Update and Wi-Fi</summary>
-<p id="fw" style="font-size:13px;color:#cfd6df;white-space:pre-line"></p>
-<div class="g2"><button onclick="$('fw').textContent='Checking...';q('/fw')">Check for update</button><button onclick="upGo()">Update both now</button></div>
+<p id="fw" style="font-size:13px;color:#cfd6df;white-space:pre-line"></p><p id="ck" hidden style="font-size:13px;color:#4fc3f7"><i class="spin"></i> Asking GitHub for the newest build...</p>
+<div class="g2"><button onclick="$('ck').hidden=false;q('/fw')">Check for update</button><button onclick="upGo()">Update both now</button></div>
 <button id="au" style="width:100%" onclick="q('/set?auto=1')"></button>
 <button style="width:100%" onclick="location.href='/wifi'">Wi-Fi and password</button>
 </details></div>
@@ -531,7 +559,7 @@ for(var i=0;i<6;i++){$('p'+i).className=s.ps[i]?'on':''}
 $('au').textContent=s.auto?'Automatic updates: ON (tap to turn off)':'Automatic updates: OFF (tap to turn on)';$('au').className=s.auto?'on':'';
 if(s.lat>s.fw&&s.fw>0)w+='Update available: build '+s.lat+'. ';$('warn').textContent=w;
 if(!U&&s.ust>0)U={from:s.fw,target:0,jon:!!s.jon,t0:Date.now(),step:2,end:''};if(U)upDraw(s);
-$('fw').textContent='Head: build '+s.fw+' at '+s.ip+'\nJoystick box: '+(s.jon?'build '+s.jfw+' at '+s.jip:'not seen')+'\nNewest on GitHub: '+(s.lat<0?'not checked yet':'build '+s.lat)+(s.msg?'\n'+s.msg:'')}
+$('fw').textContent='Head: build '+s.fw+' at '+s.ip+'\nJoystick box: '+(s.jon?'build '+s.jfw+' at '+s.jip:'not seen')+'\nNewest on GitHub: '+(s.lat<0?'not checked yet':'build '+s.lat)+'\nFree memory: '+s.heap+' KB (largest piece '+s.blk+' KB)'+(s.msg?'\n'+s.msg:'');$('ck').hidden=!s.chk}
 function q(u){var c=new AbortController(),t=setTimeout(function(){c.abort()},2500);return fetch(u,{signal:c.signal}).then(function(r){return r.json()}).then(show).catch(function(){$('st').textContent='no connection to the head';if(U)upDraw(null)}).then(function(){clearTimeout(t)})}
 // ---- live update progress
 var U=null;try{U=JSON.parse(sessionStorage.x70up||'null')}catch(e){}if(U&&Date.now()-U.t0>600000)U=null;
@@ -700,14 +728,14 @@ void sendStatus() {
   else if ((pan.viscaCmd != 0 || tilt.viscaCmd != 0 || pan.going || tilt.going) && (int32_t)(manualUntil - now) <= 0) src = 2;
   if (src == 0 && !trackingOn && viscaLastMs != 0 && now - viscaLastMs < 2000) src = 3;   // OBS is talking but blocked
   long pp = pan.st ? (long)(pan.st->getCurrentPosition() * sgn(pan)) : 0, tp = tilt.st ? (long)(tilt.st->getCurrentPosition() * sgn(tilt)) : 0;
-  char b[900]; String ipS = WiFi.localIP().toString(), jipS = (joySeenMs != 0 && millis() - joySeenMs < 6000) ? joyIP.toString() : String("");
+  char b[980]; String ipS = WiFi.localIP().toString(), jipS = (joySeenMs != 0 && millis() - joySeenMs < 6000) ? joyIP.toString() : String("");
   snprintf(b, sizeof b,
     "{\"on\":%d,\"trk\":%d,\"src\":%d,\"pd\":%.2f,\"td\":%.2f,\"pt\":%.3f,\"tt\":%.3f,\"gp\":%.2f,\"gt\":%.2f,\"pl\":%d,\"tl\":%d,\"dp\":%d,\"dt\":%d,"
-    "\"max\":%d,\"ramp\":%.1f,\"tsc\":%.2f,\"tramp\":%.1f,\"rssi\":%d,\"ps\":[%d,%d,%d,%d,%d,%d],\"fw\":%d,\"auto\":%d,\"lat\":%d,\"jfw\":%d,\"jon\":%d,\"ip\":\"%s\",\"jip\":\"%s\",\"ust\":%d,\"upc\":%d,\"utry\":%d,\"msg\":\"%s\"}",
+    "\"max\":%d,\"ramp\":%.1f,\"tsc\":%.2f,\"tramp\":%.1f,\"rssi\":%d,\"ps\":[%d,%d,%d,%d,%d,%d],\"fw\":%d,\"auto\":%d,\"lat\":%d,\"jfw\":%d,\"jon\":%d,\"ip\":\"%s\",\"jip\":\"%s\",\"ust\":%d,\"upc\":%d,\"utry\":%d,\"chk\":%d,\"heap\":%d,\"blk\":%d,\"msg\":\"%s\"}",
     motorsOn, trackingOn, src, stepsToDeg(pan, pp), stepsToDeg(tilt, tp), pp / STEPS_PER_TURN, tp / STEPS_PER_TURN, pan.gear, tilt.gear,
     limited(pan), limited(tilt), pan.found, tilt.found, (int)maxRpm, ramp, trackScale, trackRamp, (int)WiFi.RSSI(),
     presetSet[0], presetSet[1], presetSet[2], presetSet[3], presetSet[4], presetSet[5],
-    FW_BUILD, autoUpdate, latestBuild, joyBuild, (int)(joySeenMs != 0 && millis() - joySeenMs < 6000), ipS.c_str(), jipS.c_str(), updMode ? (updStage ? (int)updStage : 1) : 0, (int)updPct, (int)updTry, fwMsg.c_str());
+    FW_BUILD, autoUpdate, latestBuild, joyBuild, (int)(joySeenMs != 0 && millis() - joySeenMs < 6000), ipS.c_str(), jipS.c_str(), updMode ? (updStage ? (int)updStage : 1) : 0, (int)updPct, (int)updTry, chkState == 1, (int)(ESP.getFreeHeap() / 1024), (int)(ESP.getMaxAllocHeap() / 1024), fwMsg.c_str());
   web.send(200, "application/json", b);
 }
 
@@ -768,7 +796,7 @@ void webSetup() {
     }
     sendStatus();
   });
-  web.on("/fw", []() { if (headMoving()) fwMsg = "Stop the head first"; else checkLatest(); sendStatus(); });
+  web.on("/fw", []() { if (headMoving()) fwMsg = "Stop the head first"; else { fwMsg = ""; startCheck(false); } sendStatus(); });
   web.on("/fwgo", []() {
     if (headMoving()) fwMsg = "Stop the head first";
     else { fwMsg = "Restarting to update"; updateRequested = true; }
@@ -792,7 +820,7 @@ void webSetup() {
     if (s.length()) { prefs.putString("ssid", s); if (p.length() || s != wifiSsid) prefs.putString("wpass", p); }
     if (web.hasArg("s2")) { prefs.putString("ssid2", s2); if (p2.length() || s2 != wifiSsid2) prefs.putString("wpass2", p2); }   // empty name = forget network 2
     if (d.length() >= 8) prefs.putString("dpass", d);
-    web.send(200, "text/html", "<body style='font:16px sans-serif;padding:16px'>Saved. The head is restarting and will join that Wi-Fi. If it cannot, it brings back its own X70-Head Wi-Fi.");
+    web.send(200, "text/html", waitPage("Saved. The head is restarting", "Still not back? If you moved it to a different Wi-Fi, put this phone or PC on that Wi-Fi and open x70head.local. If the name or password was wrong, join the Wi-Fi called X70-Head and open 192.168.4.1/wifi to correct it.", "/s", 45));
     delay(800); setMotors(false); ESP.restart();
   });
   webUpdater.setup(&web, "/update", "admin", devPass.c_str());   // upload a .bin from any browser
@@ -887,15 +915,19 @@ void loop() {
                ((lastInputMs == 0 && lastMoveMs == 0) || (now - lastInputMs > 300000UL && now - lastMoveMs > 300000UL));
   if (online && quiet && now > 45000UL && (lastCheck == 0 || now - lastCheck > 600000UL)) {
     lastCheck = now;
-    checkLatest();
-    if (autoUpdate && FW_BUILD > 0 && latestBuild > FW_BUILD) { Serial.printf("New build %d found: updating\n", latestBuild); updateRequested = true; }
+    startCheck(true);
+  }
+  if (chkState == 2) {                                                     // the answer from GitHub has arrived
+    if (chkErr[0]) fwMsg = chkErr; else { latestBuild = chkBuild; fwMsg = ""; }
+    if (chkAuto && !chkErr[0] && autoUpdate && FW_BUILD > 0 && latestBuild > FW_BUILD) { Serial.printf("New build %d found: updating\n", latestBuild); updateRequested = true; }
+    chkState = 0;
   }
   // joystick box still on an older build (it was off during the last update): tell it again, at most every 5 minutes
   bool still = !headMoving() && pan.viscaCmd == 0 && tilt.viscaCmd == 0 && pan.webCmd == 0 && tilt.webCmd == 0;
   if (online && still && joyBuild > 0 && now - joySeenMs < 6000 &&
       (joyBuild < FW_BUILD || (quiet && autoUpdate && joyBuild < latestBuild)) &&            // the two always run the same build
       (lastJoyNudge == 0 || now - lastJoyNudge > 300000UL)) { lastJoyNudge = now; for (int i = 0; i < 3; i++) { tellJoystick("U"); delay(30); } }
-  if (updateRequested && !headMoving()) {
+  if (updateRequested && !headMoving() && chkState == 0) {
     updateRequested = false;
     requestUpdateRestart();                    // the head goes first; the joystick box is told once the head is back (below)
   }
