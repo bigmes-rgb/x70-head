@@ -93,6 +93,7 @@ Axis pan  = {"pan",  'p', nullptr, &drvPan,  false, false, 0, false, false, 0, 0
 Axis tilt = {"tilt", 't', nullptr, &drvTilt, false, false, 0, false, false, 0, 0, 0, 0, 0, 0, false, 0};
 Axis *AX[2] = {&pan, &tilt};
 
+float joyScale = 0.5f;     // joystick full deflection = this share of the top speed (page slider)
 float maxRpm = 120;        // top motor speed (page slider)
 float ramp   = 1.0f;       // seconds for a speed change to ease in / out (page slider)
 bool  motorsOn = false;
@@ -117,7 +118,7 @@ float stepsToDeg(const Axis &x, long s) { return x.gear > 0 ? s / STEPS_PER_TURN
 String k(const Axis &x, const char *what) { String s; s += x.key; s += what; return s; }
 void loadAll() {
   prefs.begin("x70head", false);
-  maxRpm = prefs.getFloat("max", 120); ramp = prefs.getFloat("ramp", 1.0f);
+  joyScale = prefs.getFloat("jsc", 0.5f); maxRpm = prefs.getFloat("max", 120); ramp = prefs.getFloat("ramp", 1.0f);
   trackScale = prefs.getFloat("tsc", 0.2f); trackRamp = prefs.getFloat("tramp", 0.5f);
   wifiSsid = prefs.getString("ssid", ""); wifiPass = prefs.getString("wpass", ""); wifiSsid2 = prefs.getString("ssid2", ""); wifiPass2 = prefs.getString("wpass2", ""); devPass = prefs.getString("dpass", DEFAULT_PASS);
   autoUpdate = prefs.getBool("auto", true);
@@ -435,8 +436,8 @@ void tellJoystick(const char *msg) {          // straight to the box if its addr
 
 // ---------------- joystick input (page and joystick box) ----------------
 void joyInput(float x, float y) {                       // x, y from -1 to 1
-  auto curve = [](float u) { float m = fabsf(u); if (m < 0.06f) return 0.0f; m = (m - 0.06f) / 0.94f; return (u < 0 ? -1.0f : 1.0f) * powf(m, 2.2f); };   // fine control near the middle
-  pan.webCmd = curve(constrain(x, -1.0f, 1.0f)) * maxSps(); tilt.webCmd = curve(constrain(y, -1.0f, 1.0f)) * maxSps();
+  auto curve = [](float u) { float m = fabsf(u); if (m < 0.06f) return 0.0f; m = (m - 0.06f) / 0.94f; return (u < 0 ? -1.0f : 1.0f) * powf(m, 3.0f); };   // very fine control near the middle, full speed only at the end
+  pan.webCmd = curve(constrain(x, -1.0f, 1.0f)) * maxSps() * joyScale; tilt.webCmd = curve(constrain(y, -1.0f, 1.0f)) * maxSps() * joyScale;
   lastWebMs = millis();
   if (pan.webCmd != 0 || tilt.webCmd != 0) { manualUntil = lastWebMs + MANUAL_HOLD_MS; lastInputMs = lastWebMs; }
 }
@@ -521,6 +522,7 @@ details{margin-top:14px;text-align:left;background:#1b2027;border-radius:10px;pa
 <h3>Presets (tap = go)</h3><div class="g" id="pr"></div>
 <button id="sv" style="width:100%">Save a preset: tap here, then a number</button>
 <label>Top speed <span id="mv"></span></label><input id="max" type="range" min="10" max="300" step="5">
+<label>Joystick speed <span id="jv"></span></label><input id="jsc" type="range" min="0.05" max="1" step="0.05">
 <label>Ease in / out <span id="rv"></span></label><input id="ramp" type="range" min="0.2" max="3" step="0.1">
 <details><summary>Setup: limits, direction, gears</summary>
 <p style="font-size:13px;color:#9aa5b4">Drive slowly to the furthest safe point each way and tap the matching button. Until both ends of an axis are set, that axis stays slow.</p>
@@ -550,7 +552,8 @@ pad.onpointerup=pad.onpointercancel=function(){act=false;X=Y=0;setK()};
 function show(s){S=s;var t=(s.gp>0?'Pan '+s.pd.toFixed(1)+'°':'Pan '+s.pt.toFixed(2)+' motor turns')+'   '+(s.gt>0?'Tilt '+s.td.toFixed(1)+'°':'Tilt '+s.tt.toFixed(2)+' motor turns');
 t+='\n'+(s.src==3?'OBS is sending commands: IGNORED, tracking is blocked':s.src==2?'OBS face tracking is moving the head':s.src==1?'Joystick':(s.on?'Holding':'No commands'))+(s.on?'':' (MOTORS OFF)')+'   Wi-Fi signal: '+(s.rssi>=-60?'strong':s.rssi>=-70?'good':s.rssi>=-80?'weak':'very weak');t+='\nHead '+s.ip+'   Joystick '+(s.jip||'not seen');$('st').textContent=t;
 var w='';if(!s.dp)w+='Pan driver not answering. ';if(!s.dt)w+='Tilt driver not answering. ';if(!s.pl)w+='Pan limits not set (slow). ';if(!s.tl)w+='Tilt limits not set (slow). ';$('warn').textContent=w;
-if(document.activeElement!=$('max')){$('max').value=s.max}$('mv').textContent=s.max+' RPM motor';
+if(document.activeElement!=$('max')){$('max').value=s.max}$('mv').textContent=s.max+' RPM motor (limit for joystick, presets and tracking)';
+if(document.activeElement!=$('jsc')){$('jsc').value=s.jsc}$('jv').textContent=Math.round(s.jsc*100)+' % of top speed with the stick fully over';
 if(document.activeElement!=$('ramp')){$('ramp').value=s.ramp}$('rv').textContent=s.ramp.toFixed(1)+' s';
 if(document.activeElement!=$('gp')&&document.activeElement!=$('gt')){$('gp').value=s.gp;$('gt').value=s.gt}
 $('trk').textContent=s.trk?'Face tracking allowed (tap to block)':'Face tracking BLOCKED (tap to allow)';$('trk').className=s.trk?'':'sv';
@@ -582,7 +585,7 @@ function lim(a,e){q('/lim?a='+a+'&e='+e)}
 for(var i=0;i<6;i++){var b=document.createElement('button');b.id='p'+i;b.textContent=i+1;b.onclick=(function(n){return function(){q('/p?n='+n+(saving?'&save=1':''));saving=false;$('sv').className=''}})(i);$('pr').appendChild(b)}
 $('sv').onclick=function(){saving=!saving;$('sv').className=saving?'sv':''};
 $('stop').onclick=function(){X=Y=0;setK();q('/stop')};
-$('max').onchange=function(){q('/set?max='+this.value)};$('ramp').onchange=function(){q('/set?ramp='+this.value)};
+$('max').onchange=function(){q('/set?max='+this.value)};$('jsc').onchange=function(){q('/set?jsc='+this.value)};$('ramp').onchange=function(){q('/set?ramp='+this.value)};
 $('mo').onclick=function(){q('/en?on='+(S.on?0:1))};$('trk').onclick=function(){q('/trk')};
 setInterval(function(){if(busy)return;var mvg=act||X||Y;if(mvg||last){busy=true;last=mvg?1:0;fetch('/j?x='+X.toFixed(3)+'&y='+Y.toFixed(3)).then(function(r){return r.json()}).then(show).catch(function(){}).then(function(){busy=false})}
 else if(++idle>=10){idle=0;busy=true;q('/s').then(function(){busy=false})}},100);
@@ -731,11 +734,11 @@ void sendStatus() {
   char b[980]; String ipS = WiFi.localIP().toString(), jipS = (joySeenMs != 0 && millis() - joySeenMs < 6000) ? joyIP.toString() : String("");
   snprintf(b, sizeof b,
     "{\"on\":%d,\"trk\":%d,\"src\":%d,\"pd\":%.2f,\"td\":%.2f,\"pt\":%.3f,\"tt\":%.3f,\"gp\":%.2f,\"gt\":%.2f,\"pl\":%d,\"tl\":%d,\"dp\":%d,\"dt\":%d,"
-    "\"max\":%d,\"ramp\":%.1f,\"tsc\":%.2f,\"tramp\":%.1f,\"rssi\":%d,\"ps\":[%d,%d,%d,%d,%d,%d],\"fw\":%d,\"auto\":%d,\"lat\":%d,\"jfw\":%d,\"jon\":%d,\"ip\":\"%s\",\"jip\":\"%s\",\"ust\":%d,\"upc\":%d,\"utry\":%d,\"chk\":%d,\"heap\":%d,\"blk\":%d,\"msg\":\"%s\"}",
+    "\"max\":%d,\"ramp\":%.1f,\"tsc\":%.2f,\"tramp\":%.1f,\"rssi\":%d,\"ps\":[%d,%d,%d,%d,%d,%d],\"fw\":%d,\"auto\":%d,\"lat\":%d,\"jfw\":%d,\"jon\":%d,\"ip\":\"%s\",\"jip\":\"%s\",\"ust\":%d,\"upc\":%d,\"utry\":%d,\"chk\":%d,\"jsc\":%.2f,\"heap\":%d,\"blk\":%d,\"msg\":\"%s\"}",
     motorsOn, trackingOn, src, stepsToDeg(pan, pp), stepsToDeg(tilt, tp), pp / STEPS_PER_TURN, tp / STEPS_PER_TURN, pan.gear, tilt.gear,
     limited(pan), limited(tilt), pan.found, tilt.found, (int)maxRpm, ramp, trackScale, trackRamp, (int)WiFi.RSSI(),
     presetSet[0], presetSet[1], presetSet[2], presetSet[3], presetSet[4], presetSet[5],
-    FW_BUILD, autoUpdate, latestBuild, joyBuild, (int)(joySeenMs != 0 && millis() - joySeenMs < 6000), ipS.c_str(), jipS.c_str(), updMode ? (updStage ? (int)updStage : 1) : 0, (int)updPct, (int)updTry, chkState == 1, (int)(ESP.getFreeHeap() / 1024), (int)(ESP.getMaxAllocHeap() / 1024), fwMsg.c_str());
+    FW_BUILD, autoUpdate, latestBuild, joyBuild, (int)(joySeenMs != 0 && millis() - joySeenMs < 6000), ipS.c_str(), jipS.c_str(), updMode ? (updStage ? (int)updStage : 1) : 0, (int)updPct, (int)updTry, chkState == 1, joyScale, (int)(ESP.getFreeHeap() / 1024), (int)(ESP.getMaxAllocHeap() / 1024), fwMsg.c_str());
   web.send(200, "application/json", b);
 }
 
@@ -751,6 +754,7 @@ void webSetup() {
   web.on("/trk", []() { trackingOn = !trackingOn; if (!trackingOn) pan.viscaCmd = tilt.viscaCmd = 0; sendStatus(); });
   web.on("/en", []() { setMotors(web.arg("on") == "1"); sendStatus(); });
   web.on("/set", []() {
+    if (web.hasArg("jsc"))  { joyScale = constrain(web.arg("jsc").toFloat(), 0.05f, 1.0f); prefs.putFloat("jsc", joyScale); }
     if (web.hasArg("max"))  { maxRpm = constrain(web.arg("max").toFloat(), 10.0f, 300.0f); prefs.putFloat("max", maxRpm); }
     if (web.hasArg("tsc"))   { trackScale = constrain(web.arg("tsc").toFloat(), 0.05f, 1.0f); prefs.putFloat("tsc", trackScale); }
     if (web.hasArg("tramp")) { trackRamp = constrain(web.arg("tramp").toFloat(), 0.2f, 2.0f); prefs.putFloat("tramp", trackRamp); }
