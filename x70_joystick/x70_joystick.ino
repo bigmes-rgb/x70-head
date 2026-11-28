@@ -158,6 +158,19 @@ void setup() {
   delay(800);
   long ca = 0, cb = 0; for (int i = 0; i < 20; i++) { ca += readAvg(PIN_A); cb += readAvg(PIN_B); delay(20); }
   A.centre = ca / 20; B.centre = cb / 20;
+  // The stick's rest position is remembered. If this start-up reads something clearly different (the stick is being
+  // held, or the box restarted from a power dip and the sensors have not settled), the remembered position is used,
+  // so the box can never start up believing that "pushed" is "at rest" and send the head off by itself.
+  {
+    int sa = prefs.getInt("ca", -1), sb = prefs.getInt("cb", -1);
+    bool plausible = A.centre > 300 && A.centre < 3800 && B.centre > 300 && B.centre < 3800;
+    if (sa > 0 && sb > 0 && (!plausible || abs(A.centre - sa) > 160 || abs(B.centre - sb) > 160)) {
+      Serial.printf("Rest position at start-up looks wrong (%d, %d): using the remembered one (%d, %d)\n", A.centre, B.centre, sa, sb);
+      A.centre = sa; B.centre = sb;
+    } else if (plausible && (sa < 0 || abs(A.centre - sa) > 12 || abs(B.centre - sb) > 12)) {
+      prefs.putInt("ca", A.centre); prefs.putInt("cb", B.centre);
+    }
+  }
   b1.last = digitalRead(PIN_BTN1) == LOW; b2.last = digitalRead(PIN_BTN2) == LOW;
   trkWanted = b2.last != trkInvert;
   evtId = esp_random() & 0xFFFFF;
@@ -273,6 +286,16 @@ void loop() {
     if (flipLR) x = -x;
     if (flipUD) y = -y;
     bool moving = fabsf(x) > 0.05f || fabsf(y) > 0.05f;
+    // After start-up, and after the Wi-Fi comes back, nothing is sent until the stick has been seen at rest for half
+    // a second. A stick that reads "pushed" at that moment is a fault, not a command.
+    static bool armed = false; static uint32_t restSince = 0; static bool wifiWas = false;
+    if (wifi && !wifiWas) { armed = false; restSince = 0; }
+    wifiWas = wifi;
+    if (!armed) {
+      if (moving) restSince = 0;
+      else { if (restSince == 0) restSince = now; if (now - restSince >= 500) armed = true; }
+      moving = false;
+    }
     if (wasMoving && !moving) zerosLeft = 10;                      // tell the head clearly that the stick was let go
     if (wifi && (moving || zerosLeft > 0)) {
       char m[32]; snprintf(m, sizeof m, "J,%.3f,%.3f", moving ? x : 0.0f, moving ? y : 0.0f);

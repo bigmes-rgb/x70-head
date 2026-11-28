@@ -25,6 +25,8 @@ const char *FW_SITE = "https://bigmes-rgb.github.io/x70-head/";
 const char *AP_NAME = "X70-Head";
 const char *DEFAULT_PASS = "x70head123";   // device password until you change it on the Wi-Fi page
 
+#include <stdarg.h>
+#include <esp_system.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <WiFiUdp.h>
@@ -182,6 +184,18 @@ void configure(TMC2209Stepper &d) {      // the settings proven with the test sk
   d.GSTAT(0b111);
 }
 void setMotors(bool on);
+// ---------------- event log ----------------
+// The last things that happened, with the time since power-up. Shown on the page ("Recent events") so that an odd
+// movement can be traced to its cause afterwards.
+const int NEV = 48;
+char evBuf[NEV][76]; int evHead = 0, evCount = 0;
+void ev(const char *fmt, ...) {
+  char m[60]; va_list ap; va_start(ap, fmt); vsnprintf(m, sizeof m, fmt, ap); va_end(ap);
+  uint32_t t = millis() / 1000;
+  snprintf(evBuf[evHead], sizeof evBuf[0], "%02u:%02u:%02u  %s", (unsigned)(t / 3600), (unsigned)(t / 60 % 60), (unsigned)(t % 60), m);
+  Serial.println(evBuf[evHead]);
+  evHead = (evHead + 1) % NEV; if (evCount < NEV) evCount++;
+}
 bool driversDown = false;                // true while a driver is not answering (no 12 V)
 unsigned long lastDrvCheck = 0;
 // Runs once a second while the head is still. Lets 12 V and USB be plugged in any order:
@@ -195,12 +209,12 @@ void driverWatch() {
       miss[i] = 0;
       if (!x->found || (x->drv->GSTAT() & 1)) {
         configure(*x->drv);
-        Serial.printf("%s driver: powered, set up again\n", x->name);
+        ev("%s driver: powered, set up again", x->name);
         x->found = true; changed = true;
       }
     } else if (x->found && ++miss[i] >= 2) {
       x->found = false; changed = true;
-      Serial.printf("%s driver: not answering (12 V off?)\n", x->name);
+      ev("%s driver: not answering (12 V off?)", x->name);
     }
     i++;
   }
@@ -263,7 +277,16 @@ void motionTick(float dt) {
     float w = 4.74f / (x.trk ? trackRamp : ramp);                                                // reaches 95 % of the new speed in 'ramp' seconds
     float vBefore = x.v;
     float acc = w * w * (target - x.v) - 2.0f * w * x.a;
-    x.a += acc * dt; x.v += x.a * dt;
+    x.a += acc * dt;
+    if (!x.trk) {
+      // Joystick moves: however hard the stick is thrown over, the speed builds up no faster than this, so a big
+      // move starts as gently as a small one. Stopping may be twice as quick, so letting go still stops promptly.
+      float aUp = maxSps() * joyScale / fmaxf(0.3f, ramp * 2.0f);
+      bool speedingUp = fabsf(target) > fabsf(x.v) && target * x.v >= 0;
+      float lim = speedingUp ? aUp : aUp * 2.0f;
+      x.a = constrain(x.a, -lim, lim);
+    }
+    x.v += x.a * dt;
     // limits: the closer to the end, the slower it may go toward it
     long pos = x.st->getCurrentPosition();
     float brake = maxSps() / STOP_TIME;
@@ -356,9 +379,9 @@ void viscaPoll() {
   uint8_t out[24];
   // TCP (Face Tracker PTZ "VISCA over TCP")
   if (!viscaClient || !viscaClient.connected()) {
-    if (viscaClient) { viscaClient.stop(); pan.viscaCmd = tilt.viscaCmd = 0; len = 0; }     // tracker went away: stop
+    if (viscaClient) { viscaClient.stop(); pan.viscaCmd = tilt.viscaCmd = 0; len = 0; ev("OBS disconnected"); }     // tracker went away: stop
     WiFiClient c = viscaTcp.accept();
-    if (c) { viscaClient = c; viscaClient.setNoDelay(true); len = 0; }
+    if (c) { viscaClient = c; viscaClient.setNoDelay(true); len = 0; ev("OBS connected from %s", c.remoteIP().toString().c_str()); }
   }
   if (viscaClient && viscaClient.connected()) {
     int guard = 64;
@@ -458,6 +481,7 @@ void tellJoystick(const char *msg) {          // straight to the box if its addr
 }
 
 // ---------------- joystick input (page and joystick box) ----------------
+bool stickFromBox = false;               // who moved the stick last: the joystick box or the page
 void joyInput(float x, float y) {                       // x, y from -1 to 1
   auto curve = [](float u) { float m = fabsf(u); if (m < 0.06f) return 0.0f; m = (m - 0.06f) / 0.94f; return (u < 0 ? -1.0f : 1.0f) * m * m; };   // even build-up: fine near the middle without a sudden surge at the end of the stick's travel
   pan.webCmd = curve(constrain(x, -1.0f, 1.0f)) * maxSps() * joyScale; tilt.webCmd = curve(constrain(y, -1.0f, 1.0f)) * maxSps() * joyScale;
@@ -465,9 +489,10 @@ void joyInput(float x, float y) {                       // x, y from -1 to 1
   if (pan.webCmd != 0 || tilt.webCmd != 0) { manualUntil = lastWebMs + MANUAL_HOLD_MS; lastInputMs = lastWebMs; }
 }
 void recallPreset(int n) {
+  ev("preset %d asked for", n + 1);
   if (n >= 0 && n < NPRESET && presetSet[n]) { manualUntil = millis() + MANUAL_HOLD_MS; pan.viscaCmd = tilt.viscaCmd = 0; gotoPos(presetPos[n][0], presetPos[n][1]); }
 }
-void setTracking(bool on) { trackingOn = on; if (!on) pan.viscaCmd = tilt.viscaCmd = 0; }
+void setTracking(bool on) { if (on != trackingOn) ev("tracking %s by the joystick box", on ? "ALLOWED" : "BLOCKED"); trackingOn = on; if (!on) pan.viscaCmd = tilt.viscaCmd = 0; }
 // Joystick box packets (text, UDP 52380):  "J,x,y"  stick   |  "B,id,P,n"  recall preset n   |  "B,id,T"  tracking on/off
 void joyBoxPoll() {
   static long lastId = -1;
@@ -476,8 +501,9 @@ void joyBoxPoll() {
     if (sz <= 0) return;
     char b[40]; int n = joyUdp.read((uint8_t *)b, sizeof b - 1); if (n <= 0) continue; b[n] = 0;
     float x, y; long id; int k;
+    if (joyUdp.remoteIP() != joyIP) ev("joystick box talking from %s", joyUdp.remoteIP().toString().c_str());
     joyIP = joyUdp.remoteIP();
-    if (sscanf(b, "J,%f,%f", &x, &y) == 2) { joyInput(x, y); joySeenMs = millis(); }
+    if (sscanf(b, "J,%f,%f", &x, &y) == 2) { stickFromBox = true; joyInput(x, y); joySeenMs = millis(); }
     else if (sscanf(b, "H,%d", &k) == 1) {                                           // joystick box heartbeat: build number, tracking switch
       joyBuild = k; joySeenMs = millis();
       int sw = -1; static int lastSw = -1;
@@ -546,7 +572,7 @@ details{margin-top:14px;text-align:left;background:#1b2027;border-radius:10px;pa
 <button id="sv" style="width:100%">Save a preset: tap here, then a number</button>
 <label>Top speed <span id="mv"></span></label><input id="max" type="range" min="10" max="300" step="5">
 <label>Joystick speed <span id="jv"></span></label><input id="jsc" type="range" min="0.05" max="1" step="0.05">
-<label>Ease in / out <span id="rv"></span></label><input id="ramp" type="range" min="0.2" max="3" step="0.1">
+<label>Joystick smoothness <span id="rv"></span></label><input id="ramp" type="range" min="0.2" max="3" step="0.1">
 <details><summary>Setup: limits, direction, gears</summary>
 <p style="font-size:13px;color:#9aa5b4">Drive slowly to the furthest safe point each way and tap the matching button. Until both ends of an axis are set, that axis stays slow.</p>
 <div class="g2"><button onclick="lim('p','l')">Left limit here</button><button onclick="lim('p','r')">Right limit here</button>
@@ -558,6 +584,9 @@ details{margin-top:14px;text-align:left;background:#1b2027;border-radius:10px;pa
 Pan <input id="gp" type="number" step="0.01"> Tilt <input id="gt" type="number" step="0.01"> <button onclick="q('/set?gp='+$('gp').value+'&gt='+$('gt').value)">Save</button>
 <button id="mo" style="width:100%"></button>
 </details>
+<details id="evd"><summary>Recent events (what moved the head, and why)</summary>
+<pre id="evt" style="font-size:12px;white-space:pre-wrap;color:#cfd6df;margin:6px 0">tap to load</pre>
+<button style="width:100%" onclick="evLoad()">Refresh</button></details>
 <details><summary>Update and Wi-Fi</summary>
 <p id="fw" style="font-size:13px;color:#cfd6df;white-space:pre-line"></p><p id="ck" hidden style="font-size:13px;color:#4fc3f7"><i class="spin"></i> Asking GitHub for the newest build...</p>
 <div class="g2"><button onclick="$('ck').hidden=false;q('/fw')">Check for update</button><button onclick="upGo()">Update both now</button></div>
@@ -575,9 +604,9 @@ pad.onpointerup=pad.onpointercancel=function(){act=false;X=Y=0;setK()};
 function show(s){S=s;var t=(s.gp>0?'Pan '+s.pd.toFixed(1)+'°':'Pan '+s.pt.toFixed(2)+' motor turns')+'   '+(s.gt>0?'Tilt '+s.td.toFixed(1)+'°':'Tilt '+s.tt.toFixed(2)+' motor turns');
 t+='\n'+(s.src==3?'OBS is sending commands: IGNORED, tracking is blocked':s.src==2?'OBS face tracking is moving the head':s.src==1?'Joystick':(s.on?'Holding still':'No commands'))+(s.on?'':' (MOTORS OFF)')+'\n'+(s.obs?(s.trk?'OBS is connected'+(s.src==2||s.src==1?'':': waiting for a face to move away from the target'):'OBS is connected but tracking is BLOCKED'):'OBS is NOT connected to the head')+'   Wi-Fi signal: '+(s.rssi>=-60?'strong':s.rssi>=-70?'good':s.rssi>=-80?'weak':'very weak');t+='\nHead '+s.ip+'   Joystick '+(s.jip||'not seen');$('st').textContent=t;
 var w='';if(!s.dp)w+='Pan driver not answering. ';if(!s.dt)w+='Tilt driver not answering. ';if(!s.pl)w+='Pan limits not set (slow). ';if(!s.tl)w+='Tilt limits not set (slow). ';$('warn').textContent=w;
-if(document.activeElement!=$('max')){$('max').value=s.max}$('mv').textContent=s.max+' RPM motor (limit for joystick, presets and tracking)';
-if(document.activeElement!=$('jsc')){$('jsc').value=s.jsc}$('jv').textContent=Math.round(s.jsc*100)+' % of top speed with the stick fully over';
-if(document.activeElement!=$('ramp')){$('ramp').value=s.ramp}$('rv').textContent=s.ramp.toFixed(1)+' s';
+if(document.activeElement!=$('max')){$('max').value=s.max}$('mv').textContent=(s.gp>0?(s.max*6/s.gp).toFixed(0)+' \u00b0/s pan, '+(s.gt>0?(s.max*6/s.gt).toFixed(0):'?')+' \u00b0/s tilt':s.max+' RPM at the motor (set the gears to see degrees per second)')+'. Limit for everything.';
+if(document.activeElement!=$('jsc')){$('jsc').value=s.jsc}$('jv').textContent=Math.round(s.jsc*100)+' % of top speed'+(s.gp>0?' = '+(s.max*6/s.gp*s.jsc).toFixed(1)+' \u00b0/s pan':'')+' with the stick fully over';
+if(document.activeElement!=$('ramp')){$('ramp').value=s.ramp}$('rv').textContent='full speed after about '+(s.ramp*2).toFixed(1)+' s (higher = gentler starts, slower stops)';
 if(document.activeElement!=$('gp')&&document.activeElement!=$('gt')){$('gp').value=s.gp;$('gt').value=s.gt}
 $('trk').textContent=s.trk?'Face tracking allowed (tap to block)':'Face tracking BLOCKED (tap to allow)';$('trk').className=s.trk?'':'sv';
 $('mo').textContent=s.on?'Switch motors OFF (camera may sag)':'Switch motors ON';
@@ -605,6 +634,8 @@ $('um').textContent=U.end=='ok'?'':U.end=='bad'?U.msg:!s?'The head is restarting
 $('ux').hidden=!U.end;if(U.end=='ok'&&$('u6').className=='us now'){$('ut').textContent='Head done, joystick box next';$('um').textContent='The joystick box updates by itself now. You can close this.'}$('up').hidden=false;try{sessionStorage.x70up=JSON.stringify(U)}catch(e){}}
 $('ux').onclick=function(){U=null;$('up').hidden=true;try{sessionStorage.removeItem('x70up')}catch(e){}};
 function lim(a,e){q('/lim?a='+a+'&e='+e)}
+function evLoad(){fetch('/log').then(function(r){return r.text()}).then(function(t){$('evt').textContent=t}).catch(function(){$('evt').textContent='could not load'})}
+$('evd').ontoggle=function(){if(this.open)evLoad()};
 for(var i=0;i<6;i++){var b=document.createElement('button');b.id='p'+i;b.textContent=i+1;b.onclick=(function(n){return function(){q('/p?n='+n+(saving?'&save=1':''));saving=false;$('sv').className=''}})(i);$('pr').appendChild(b)}
 $('sv').onclick=function(){saving=!saving;$('sv').className=saving?'sv':''};
 $('stop').onclick=function(){X=Y=0;setK();q('/stop')};
@@ -646,47 +677,39 @@ Password<input id="pw" type="password" autocomplete="off">
 <div id="ob" hidden>
 <button id="en"></button>
 <h3>1. Start here</h3>
-<select id="shot"><option value="6">Waist-up shot</option><option value="11" selected>Full-body shot</option><option value="25">Wide stage shot</option></select>
-<button id="rec">Load the recommended settings for this shot</button>
+<select id="shot" hidden><option value="11" selected>Full-body shot</option></select>
+<button id="rec">Load the recommended settings</button>
 <h3>Who to follow</h3>
 <button id="lk" class="on">LOCK on the person at the yellow cross</button>
 <small>Aim the camera with the joystick so the person is on the yellow cross, then tap. The camera stays with that person and never picks anybody else by itself.</small>
 <button id="au2">Follow automatically again (the biggest person)</button>
 <div id="fm" class="warn"></div>
 <h3>2. Fix what you see</h3>
-<button data-fix="calm">Camera swings past the person and back &rarr; make it calmer</button>
-<button data-fix="fast">Camera is slow to bring the person back &rarr; make it quicker</button>
 <button data-fix="still">Camera moves when the person only shifts a little &rarr; bigger rest zone</button>
 <button data-fix="tight">Person gets too far off-centre before it moves &rarr; smaller rest zone</button>
+<button data-fix="firm">A fast walker gets away from the camera &rarr; firmer</button>
+<button data-fix="soft">Camera moves look abrupt &rarr; gentler</button>
 <button data-fix="late">Camera follows after the person instead of with them &rarr; more anticipation</button>
 <button data-fix="ahead">Camera runs ahead of the person or hunts &rarr; less anticipation</button>
-<h3>3. Framing and speed</h3><div id="sl"></div>
+<h3>3. Framing and movement</h3><div id="sl"></div>
 <details><summary>More settings (rarely needed)</summary><div id="sl2"></div>
 <button id="ix"></button><button id="iy"></button></details>
 </div></div>
 <script>
 var $=function(i){return document.getElementById(i)},H={},ws=null,rid=0,cb={},SRC='',FLT='',FS={},FPS=30,tm={};
 // key, label, min, max, step, unit, good-from, good-to, advice when below, advice when above, basic(1)/more(0)
-var P=[['track_y','Head room: face higher or lower',-0.5,0.5,0.01,'',0.15,0.35,'face near the middle, a lot of space above','face near the top edge',1],
-['Kp_x_db','Pan speed',20,80,1,' dB',0,0,'slow, may lag behind','fast, may swing past the person',1],
-['Kp_y_db','Tilt speed',20,80,1,' dB',0,0,'slow, may lag behind','fast, may bob up and down',1],
-['zone_x','Rest zone, left and right',2,40,1,' %',8,15,'follows every small move','person can sit far off-centre',1],
-['zone_y','Rest zone, up and down',2,40,1,' %',8,15,'bobs when the person nods','slow to follow up and down',1],
-['zone_strength','How firmly to bring the person back',0.6,1.6,0.1,'',0.8,1.3,'gentle, a fast walker may get away','firm, may look abrupt',1],
-['zone_anticipation','Move with the person',0,1.2,0.05,'',0.7,1.05,'follows after the person has moved','may run ahead or hunt',1],
-['lock_hold','Stay on the same person while hidden',1,60,1,' s',5,15,'may jump to someone else quickly','may follow nothing for a while',1],
-['e_deadband_x','Still zone, left and right (zone framing off)',0,20,0.5,' %',1,4,'follows every small move','person can sit far off-centre',0],
-['e_deadband_y','Still zone, up and down (zone framing off)',0,20,0.5,' %',3,8,'bobs when the person nods','slow to follow up and down',0],
-['track_x','Face left or right in the picture',-0.5,0.5,0.01,'',-0.1,0.1,'person sits left','person sits right',0],
-['e_nonlinear_x','Soft edge of still zone, left and right',0,20,0.5,' %',2,6,'starts abruptly','vague, slow to start',0],
-['e_nonlinear_y','Soft edge of still zone, up and down',0,20,0.5,' %',4,8,'starts abruptly','vague, slow to start',0],
-['Ki_x','Pan follow-through',0,1,0.01,'',0.1,0.3,'falls behind steady walking','overshoots when the person stops',0],
-['Ki_y','Tilt follow-through',0,1,0.01,'',0.1,0.3,'falls behind','overshoots',0],
-['Td_x','Pan quick start',0,1,0.01,' s',0.1,0.4,'slow to react','shaky',0],
-['Td_y','Tilt quick start',0,1,0.01,' s',0.1,0.4,'slow to react','shaky',0],
-['Tdlpf','Smoothing',0,10,0.1,' s',1,3,'jittery','sluggish',0],
-['detect_interval','Look for faces every',0.2,5,0.1,' s',0.5,2,'more CPU','slow to notice a new face',0],
-['track_fps','Tracking rate (0 = every frame)',0,60,1,' fps',8,15,'jerky','more CPU',0]];
+var P=[['head_top_pct','Head: distance from the top',5,60,1,' % of height',18,30,'head near the top edge','a lot of space above the head',1],
+['zone_w_pct','Rest zone: width',4,80,1,' % of width',15,30,'follows every small move','person can sit far off-centre',1],
+['zone_h_pct','Rest zone: height',4,80,1,' % of height',15,30,'bobs when the person nods','slow to follow up and down',1],
+['zone_strength','Bringing the person back (0.6 gentle, 1 normal, 1.6 firm)',0.6,1.6,0.1,'',0.8,1.6,'gentle, a fast walker may get away','',1],
+['zone_anticipation','When the person walks (0 wait, 1 travel with them)',0,1,0.1,'',0.6,1,'follows after the person has moved','',1],
+['pursuit_s','Keep turning after the person walks out of the picture',0,5,0.5,' s',1,3,'stops at once when the person is lost','may turn away from where they stopped',1],
+['search_b_pct','Search area: ignore the bottom (congregation)',0,80,1,' % of height',15,40,'people in the seats may be picked','a person low in the picture is missed',1],
+['lock_hold','Automatic: wait for a lost person before picking another',1,60,1,' s',5,15,'may jump to someone else quickly','may follow nobody for a while',1],
+['head_left_pct','Head: distance from the left',20,80,1,' % of width',45,55,'person sits left','person sits right',0],
+['search_t_pct','Search area: ignore the top',0,80,1,' % of height',0,10,'','tall people are missed',0],
+['search_l_pct','Search area: ignore the left side',0,80,1,' % of width',0,15,'','person is lost on the left',0],
+['search_r_pct','Search area: ignore the right side',0,80,1,' % of width',0,15,'','person is lost on the right',0]];
 var KP=56;
 function q(u){return fetch(u).then(function(r){return r.json()}).then(head).catch(function(){})}
 function head(s){H=s;var w='';if(!(s.gp>0)||!(s.gt>0))w='Gear ratios are not set on the head page, so tracking speeds are not calibrated. ';
@@ -734,7 +757,7 @@ req('GetSourceFilterDefaultSettings',{filterKind:'face_tracker_ptz'}).then(funct
 next()}).catch(function(e){os('OBS error: '+e)})}
 function fmt(p,v){return(+v).toFixed(p[4]<0.1?2:(p[4]<1?1:0))+p[5]}
 function good(p){if(p[0]=='Kp_x_db')return[KP-5,KP+3];if(p[0]=='Kp_y_db')return[KP-8,KP];return[p[6],p[7]]}
-function note(p,v){var g=good(p);return v<g[0]?'<i class="hi">'+p[8]+'</i>':v>g[1]?'<i class="hi">'+p[9]+'</i>':'<i class="ok">good</i>'}
+function note(p,v){var g=good(p),t=v<g[0]?p[8]:v>g[1]?p[9]:'';return t?'<i class="hi">'+t+'</i>':'<i class="ok">good</i>'}
 function base(){var fov=+$('shot').value,s=+(H.tsc||0.2);return Math.max(25,Math.min(77,Math.round(20*Math.log10(fov*0.75*FPS/s))))}
 function fmode(){$('fm').textContent=FS.follow_mode=='manual'?'Manual: staying on the person you locked.':'Automatic: following the biggest person in the search area.'}
 $('lk').onclick=function(){setv('follow_mode','manual');setv('lock_request',Date.now()%1000000000);fmode();os('Lock sent. The green box should now be on that person.')};
@@ -745,7 +768,7 @@ P.forEach(function(p){var g=good(p);h[p[10]?0:1]+='<label>'+p[1]+' <b id="v_'+p[
 P.forEach(function(p){var e=$('s_'+p[0]);e.oninput=function(){var v=+e.value;show1(p,v);setv(p[0],v)}});paint()}
 function show1(p,v){var g=good(p);$('v_'+p[0]).innerHTML=fmt(p,v)+note(p,v);$('n_'+p[0]).textContent='Good: '+fmt(p,g[0])+' to '+fmt(p,g[1])}
 function nudge(k,d){var p=P.filter(function(x){return x[0]==k})[0],v=Math.max(p[2],Math.min(p[3],(+FS[k]||0)+d));setv(k,v);$('s_'+k).value=v;show1(p,v)}
-var FIX={calm:[['Kp_x_db',-3],['Kp_y_db',-3]],fast:[['Kp_x_db',3],['Kp_y_db',3]],still:[['zone_x',2],['zone_y',2]],tight:[['zone_x',-2],['zone_y',-2]],late:[['zone_anticipation',0.1]],ahead:[['zone_anticipation',-0.15]]};
+var FIX={still:[['zone_w_pct',4],['zone_h_pct',4]],tight:[['zone_w_pct',-4],['zone_h_pct',-4]],firm:[['zone_strength',0.3]],soft:[['zone_strength',-0.3]],late:[['zone_anticipation',0.2]],ahead:[['zone_anticipation',-0.2]]};
 Array.prototype.forEach.call(document.querySelectorAll('[data-fix]'),function(b){b.onclick=function(){FIX[b.dataset.fix].forEach(function(f){nudge(f[0],f[1])});os('Changed. Watch the camera for a minute before changing it again.')}});
 $('shot').onchange=function(){KP=base();if(SRC)paint()};
 function paint(){fmode();KP=base();P.forEach(function(p){var v=FS[p[0]];if(v===undefined)v=0;$('s_'+p[0]).value=v;show1(p,+v)});
@@ -754,9 +777,9 @@ $('ix').textContent='Reverse pan direction: '+(FS.invert_x?'ON':'off');$('iy').t
 $('en').onclick=function(){var v=!FS._en;req('SetSourceFilterEnabled',{sourceName:SRC,filterName:FLT,filterEnabled:v}).then(function(){FS._en=v;paint()},function(e){os('OBS error: '+e)})};
 $('ix').onclick=function(){setv('invert_x',!FS.invert_x);paint()};$('iy').onclick=function(){setv('invert_y',!FS.invert_y);paint()};
 // Start values: loop gain about 1 per second for the chosen shot width, the OBS frame rate and the head's speed scale.
-function rec(){var fov=+$('shot').value,s=+(H.tsc||0.2),kp=base();KP=kp;
-var v={Kp_x_db:kp,Kp_y_db:Math.max(20,kp-3),e_deadband_x:2,e_nonlinear_x:4,e_deadband_y:4,e_nonlinear_y:6,track_x:0,track_y:fov<8?0.2:0.25,Ki_x:0.2,Ki_y:0.2,Td_x:0.25,Td_y:0.25,Tdlpf:2,track_fps:12,lock_hold:10,detect_interval:1,zone_mode:true,zone_x:10,zone_y:10,zone_anticipation:1,zone_strength:1,e_deadband_z:50,Ki_z:0,Td_z:0,Kp_z_db:-40};
-Object.assign(FS,v);req('SetSourceFilterSettings',{sourceName:SRC,filterName:FLT,filterSettings:v,overlay:true}).then(function(){paint();os('Recommended settings loaded for this shot.')},function(e){os('OBS error: '+e)})}
+function rec(){
+var v={zone_mode:true,head_top_pct:25,head_left_pct:50,zone_w_pct:20,zone_h_pct:20,zone_strength:1,zone_anticipation:1,pursuit_s:2,lock_hold:10,person_model:'tiny',detector_engine:2};
+Object.assign(FS,v);req('SetSourceFilterSettings',{sourceName:SRC,filterName:FLT,filterSettings:v,overlay:true}).then(function(){paint();os('Recommended settings loaded. The search area was left as it is.')},function(e){os('OBS error: '+e)})}
 $('rec').onclick=rec;$('go').onclick=connect;
 try{var sv=JSON.parse(localStorage.getItem('x70obs')||'null');if(sv){$('ip').value=sv.ip;$('port').value=sv.port;$('pw').value=sv.pw}}catch(e){}
 </script></body></html>)HTML";
@@ -784,11 +807,18 @@ void webSetup() {
   web.on("/s", sendStatus);
   web.on("/tune", []() { web.sendHeader("Cache-Control", "no-store"); web.send_P(200, "text/html", TUNE); });
   web.on("/j", []() {                                   // joystick: x, y from -1 to 1
-    joyInput(web.arg("x").toFloat(), web.arg("y").toFloat());
+    stickFromBox = false; joyInput(web.arg("x").toFloat(), web.arg("y").toFloat());
     sendStatus();
   });
-  web.on("/stop", []() { stopAll(); manualUntil = millis() + MANUAL_HOLD_MS; sendStatus(); });
-  web.on("/trk", []() { trackingOn = !trackingOn; if (!trackingOn) pan.viscaCmd = tilt.viscaCmd = 0; sendStatus(); });
+  web.on("/stop", []() { ev("STOP pressed on the page"); stopAll(); manualUntil = millis() + MANUAL_HOLD_MS; sendStatus(); });
+  web.on("/trk", []() { trackingOn = !trackingOn; ev("tracking %s on the page", trackingOn ? "ALLOWED" : "BLOCKED"); if (!trackingOn) pan.viscaCmd = tilt.viscaCmd = 0; sendStatus(); });
+  web.on("/log", []() {
+    String t; t.reserve(NEV * 76 + 80);
+    uint32_t u = millis() / 1000;
+    t += "Head build "; t += FW_BUILD; t += ", running for "; t += String(u / 3600); t += " h "; t += String(u / 60 % 60); t += " min. Newest first; times are since power-up.\n";
+    for (int i = 0; i < evCount; i++) { t += evBuf[(evHead - 1 - i + NEV) % NEV]; t += '\n'; }
+    web.sendHeader("Cache-Control", "no-store"); web.send(200, "text/plain", t);
+  });
   web.on("/en", []() { setMotors(web.arg("on") == "1"); sendStatus(); });
   web.on("/set", []() {
     if (web.hasArg("jsc"))  { joyScale = constrain(web.arg("jsc").toFloat(), 0.05f, 1.0f); prefs.putFloat("jsc", joyScale); }
@@ -905,6 +935,8 @@ void setup() {
   Serial2.begin(115200, SERIAL_8N1, UART_RX, UART_TX);
   delay(300);
   Serial.printf("\n=== X70 head firmware, build %d ===\n", FW_BUILD);
+  { static const char *why[] = {"unknown", "power-up", "external reset", "restart by the firmware", "CRASH (panic)", "CRASH (watchdog)", "CRASH (watchdog)", "CRASH (watchdog)", "deep sleep", "POWER DIP (brown-out)", "SDIO"};
+    int r = (int)esp_reset_reason(); ev("started, build %d: %s", FW_BUILD, r >= 0 && r <= 10 ? why[r] : "unknown"); }
   loadAll();
 
   for (Axis *x : AX) {
@@ -922,6 +954,7 @@ void setup() {
 
   WiFi.setHostname("x70head");
   bool joined = joinSavedWifi();
+  if (joined) ev("Wi-Fi joined, address %s", WiFi.localIP().toString().c_str()); else ev("no Wi-Fi: own network X70-Head started");
   if (joined) {
     Serial.printf("\nConnected. Joystick page: http://%s   (or http://x70head.local)\n", WiFi.localIP().toString().c_str());
     Serial.printf("OBS: VISCA over TCP port 5678, or VISCA over IP (UDP) port 52381, address %s\n", WiFi.localIP().toString().c_str());
@@ -980,6 +1013,23 @@ void loop() {
   if (updateRequested && !headMoving() && chkState == 0) {
     updateRequested = false;
     requestUpdateRestart();                    // the head goes first; the joystick box is told once the head is back (below)
+  }
+  // event log: joystick box coming and going, who is moving the head, Wi-Fi
+  static uint32_t lastEvCheck = 0;
+  if (now - lastEvCheck > 200) {
+    lastEvCheck = now;
+    static bool jonWas = false, wifiWas = true; static int srcWas = 0; static uint32_t lastTrkEv = 0;
+    bool jon = joySeenMs != 0 && now - joySeenMs < 6000;
+    if (jon != jonWas) { jonWas = jon; ev(jon ? "joystick box online (build %d)" : "joystick box OFFLINE", joyBuild); }
+    bool wf = WiFi.getMode() != WIFI_STA || WiFi.status() == WL_CONNECTED;
+    if (wf != wifiWas) { wifiWas = wf; ev(wf ? "Wi-Fi back" : "Wi-Fi LOST: head stops"); }
+    int src = (pan.webCmd != 0 || tilt.webCmd != 0) ? (stickFromBox ? 1 : 2) : ((trackingOn && (pan.viscaCmd != 0 || tilt.viscaCmd != 0) && (int32_t)(manualUntil - now) <= 0) ? 3 : 0);
+    if (src != srcWas) {
+      if (src == 1) ev("moving: joystick box");
+      else if (src == 2) ev("moving: stick on the page");
+      else if (src == 3 && (lastTrkEv == 0 || now - lastTrkEv > 15000)) { lastTrkEv = now; ev("moving: OBS tracking"); }
+      srcWas = src;
+    }
   }
   if (WiFi.getMode() == WIFI_STA && WiFi.status() != WL_CONNECTED) {      // Wi-Fi dropped: stop moving, it rejoins on its own
     static uint32_t lastTry = 0;
