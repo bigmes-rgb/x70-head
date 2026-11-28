@@ -51,7 +51,7 @@ const uint16_t RUN_MA     = 600;     // motor current while moving (it holds at 
 const bool     QUIET_MODE = true;    // true = StealthChop (silent). false = SpreadCycle (noisier, a bit stronger)
 
 // ---- motion ----
-const uint16_t MICROSTEPS     = 16;
+const uint16_t MICROSTEPS     = 128;    // fine steps: at 16 each step showed as a tick in the picture when starting and stopping
 const float    STEPS_PER_TURN = 200.0f * MICROSTEPS;
 const float    SLOW_CAP_RPM   = 20;    // top motor speed while an axis has no travel limits yet
 const float    STOP_TIME      = 0.5f;  // seconds to brake from top speed when coming up to a limit
@@ -138,6 +138,22 @@ void loadAll() {
     snprintf(key, sizeof key, "pp%d", i); presetPos[i][0] = prefs.getLong(key, 0);
     snprintf(key, sizeof key, "pt%d", i); presetPos[i][1] = prefs.getLong(key, 0);
   }
+  // Positions are stored in motor steps. If the step size changed with an update, convert everything once.
+  int was = prefs.getInt("ustep", 16);
+  if (was != MICROSTEPS && was > 0) {
+    auto conv = [was](long v) { return (long)((int64_t)v * MICROSTEPS / was); };
+    for (Axis *x : AX) {
+      x->lo = conv(x->lo); x->hi = conv(x->hi); x->saved = conv(x->saved);
+      prefs.putLong(k(*x, "lo").c_str(), x->lo); prefs.putLong(k(*x, "hi").c_str(), x->hi); prefs.putLong(k(*x, "pos").c_str(), x->saved);
+    }
+    for (int i = 0; i < NPRESET; i++) {
+      char key[8];
+      presetPos[i][0] = conv(presetPos[i][0]); presetPos[i][1] = conv(presetPos[i][1]);
+      snprintf(key, sizeof key, "pp%d", i); prefs.putLong(key, presetPos[i][0]);
+      snprintf(key, sizeof key, "pt%d", i); prefs.putLong(key, presetPos[i][1]);
+    }
+    prefs.putInt("ustep", MICROSTEPS);
+  }
 }
 void saveLimits(const Axis &x) {
   prefs.putBool(k(x, "hl").c_str(), x.hasLo); prefs.putLong(k(x, "lo").c_str(), x.lo);
@@ -157,6 +173,8 @@ void configure(TMC2209Stepper &d) {      // the settings proven with the test sk
   d.toff(4);
   d.blank_time(24);
   d.microsteps(MICROSTEPS);
+  d.intpol(true);                        // the driver smooths between steps as well
+  d.iholddelay(15);                      // fade to the holding current slowly, no nudge after stopping
   d.en_spreadCycle(!QUIET_MODE);
   d.pwm_autoscale(true);
   d.TPOWERDOWN(20);
@@ -249,14 +267,14 @@ void motionTick(float dt) {
     // limits: the closer to the end, the slower it may go toward it
     long pos = x.st->getCurrentPosition();
     float brake = maxSps() / STOP_TIME;
-    if (x.v > 0 && x.hasHi) { float d = (float)(x.hi - pos) - 48.0f; float lim = d > 0 ? sqrtf(2.0f * brake * d) : 0; if (x.v > lim) { x.v = lim; if (x.a > 0) x.a = 0; } }
-    if (x.v < 0 && x.hasLo) { float d = (float)(pos - x.lo) - 48.0f; float lim = d > 0 ? sqrtf(2.0f * brake * d) : 0; if (-x.v > lim) { x.v = -lim; if (x.a < 0) x.a = 0; } }
+    if (x.v > 0 && x.hasHi) { float d = (float)(x.hi - pos) - 3.0f * MICROSTEPS; float lim = d > 0 ? sqrtf(2.0f * brake * d) : 0; if (x.v > lim) { x.v = lim; if (x.a > 0) x.a = 0; } }
+    if (x.v < 0 && x.hasLo) { float d = (float)(pos - x.lo) - 3.0f * MICROSTEPS; float lim = d > 0 ? sqrtf(2.0f * brake * d) : 0; if (-x.v > lim) { x.v = -lim; if (x.a < 0) x.a = 0; } }
     float s = fabsf(x.v);
     if (s < 1.0f) {
       if (target == 0) { x.v = x.a = 0; }
       if (x.st->isRunning()) { x.st->setAcceleration((int32_t)brake); x.st->applySpeedAcceleration(); x.st->stopMove(); }
     } else {
-      x.st->setAcceleration((int32_t)(fabsf(x.v - vBefore) / dt * 1.5f) + 300);   // glide to this tick's speed, no stair-steps
+      x.st->setAcceleration((int32_t)(fabsf(x.v - vBefore) / dt * 1.5f) + 300 * (MICROSTEPS / 16));   // glide to this tick's speed, no stair-steps
       x.st->setLinearAcceleration(0);
       if (x.st->setSpeedInMilliHz((uint32_t)(s * 1000.0f)) == 0) { if (x.v > 0) x.st->runForward(); else x.st->runBackward(); }
       lastMoveMs = now;
