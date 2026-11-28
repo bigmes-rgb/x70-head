@@ -388,6 +388,20 @@ float viscaSps(const Axis &x, int s, bool isTilt) {
   float dps = (isTilt ? SONY_TILT[constrain(s, 1, 18)] : SONY_PAN[constrain(s, 1, 24)]) * trackScale;
   return dps / 360.0f * x.gear * STEPS_PER_TURN;
 }
+// Exact speed from the tracker (command 06 7E): u is in the same unit as the Sony speed table (degrees a second on a
+// Sony camera), but any value, not just the 24 table entries. Between entries the old command could only jump -
+// by a quarter of the speed per step on a head without gear ratios - and the camera hunted between two speeds.
+float fineSps(const Axis &x, float u, bool isTilt) {
+  float a = fabsf(u);
+  if (a < 0.04f) return 0;
+  if (x.gear > 0) return a * trackScale / 360.0f * x.gear * STEPS_PER_TURN;
+  const float *T = isTilt ? SONY_TILT : SONY_PAN; int top = isTilt ? 18 : 24;
+  if (a <= T[1]) return viscaSpeed(1, isTilt ? 0x14 : 0x18) * a / T[1];
+  int k = 1; while (k < top && T[k + 1] <= a) k++;
+  float L = k >= top ? (float)top : k + (a - T[k]) / (T[k + 1] - T[k]);          // the table entry it falls at, with its fraction
+  float hi = maxSps(), lo = hi / 300.0f; int tp = isTilt ? 0x14 : 0x18;
+  return lo * powf(hi / lo, (L - 1.0f) / (float)(tp - 1));
+}
 int viscaPos(const Axis &x) {                  // Sony units: about 0.075 degree each
   if (!x.st) return 0;
   long p = (long)(x.st->getCurrentPosition() * sgn(x));
@@ -409,11 +423,20 @@ int viscaHandle(const uint8_t *p, int n, uint8_t *out) {
     }
     if (n >= 5 && p[2] == 0x04 && p[3] == 0x47) { const uint8_t r[] = {0x90, 0x50, 0, 0, 0, 0, 0xFF}; memcpy(out, r, sizeof r); return sizeof r; }   // zoom position
     if (n >= 5 && p[2] == 0x04 && p[3] == 0x00) { const uint8_t r[] = {0x90, 0x50, 0x02, 0xFF}; memcpy(out, r, sizeof r); return sizeof r; }         // power: on
-    if (n >= 5 && p[2] == 0x00 && p[3] == 0x02) { const uint8_t r[] = {0x90, 0x50, 0x00, 0x01, 0x05, 0x11, 0x01, 0x00, 0x02, 0xFF}; memcpy(out, r, sizeof r); return sizeof r; }
+    if (n >= 5 && p[2] == 0x00 && p[3] == 0x02) { const uint8_t r[] = {0x90, 0x50, 0x00, 0x01, 0x58, 0x70, 0x02, 0x00, 0x02, 0xFF};   /* model 5870 = X70 head that takes exact speeds (06 7E) */ memcpy(out, r, sizeof r); return sizeof r; }
     const uint8_t r[] = {0x90, 0x60, 0x02, 0xFF}; memcpy(out, r, sizeof r); return sizeof r;                                                       // not supported
   }
   if (p[1] == 0x01) {                                                       // commands
-    if (n >= 9 && p[2] == 0x06 && p[3] == 0x01) {                           // pan/tilt drive
+    if (n >= 13 && p[2] == 0x06 && p[3] == 0x7E) {                          // pan/tilt drive with exact speeds (X70 head only)
+      int16_t pv = (int16_t)(uint16_t)((p[4] & 15) << 12 | (p[5] & 15) << 8 | (p[6] & 15) << 4 | (p[7] & 15));
+      int16_t tv = (int16_t)(uint16_t)((p[8] & 15) << 12 | (p[9] & 15) << 8 | (p[10] & 15) << 4 | (p[11] & 15));
+      float ps = fineSps(pan, pv * 0.01f, false), ts = fineSps(tilt, tv * 0.01f, true);
+      viscaLastMs = millis();
+      pan.viscaCmd  = pv < 0 ? -ps : ps;                                     // + = right
+      tilt.viscaCmd = tv < 0 ? ts : -ts;                                     // + = down, as in the standard command
+      if (ps != 0 || ts != 0) lastInputMs = millis();
+      if (!trackingOn) pan.viscaCmd = tilt.viscaCmd = 0;
+    } else if (n >= 9 && p[2] == 0x06 && p[3] == 0x01) {                    // pan/tilt drive
       float ps = viscaSps(pan, p[4], false), ts = viscaSps(tilt, p[5], true);
       viscaLastMs = millis();
       pan.viscaCmd  = p[6] == 0x01 ? -ps : (p[6] == 0x02 ? ps : 0);         // 01 left, 02 right
