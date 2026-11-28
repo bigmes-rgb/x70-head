@@ -303,7 +303,7 @@ $('dN').setAttribute('transform','rotate('+(k?-a:a).toFixed(1)+' 100 100)');var 
 $('dA').setAttribute('d',t-f>.5?arc(k,f,t,82):'');$('dA').setAttribute('stroke',hl&&hh?'#4cd08a':'#ffb347');var g='';[[hl,lo],[hh,hi]].forEach(function(e){if(e[0]){var p=pt(k,e[1],82);g+='<circle cx="'+p[0].toFixed(1)+'" cy="'+p[1].toFixed(1)+'" r="6" fill="#4cd08a" stroke="#0d0f13" stroke-width="2"/>'}});$('dL').innerHTML=g;
 if($('dR'))$('dR').innerHTML='<span>now <b class="n">'+pos(k,v)+'</b></span>'+(hl&&hh?'<span>travel <b class="n">'+pos(k,lv[k*2+1]-lv[k*2]).replace('−','')+'</b></span>':'')}
 function wzOpen(i){W={i:i||0,s:0};$('wz').hidden=false;wzDraw()}
-function wzGo(d){AU=0;X=Y=0;W.i=Math.max(0,Math.min(6,W.i+d));W.s=0;W.m=null;wzDraw()}
+function wzGo(d){AU=0;X=Y=0;W.p0=null;W.i=Math.max(0,Math.min(6,W.i+d));W.s=0;W.m=null;wzDraw()}
 $('wzx').onclick=function(){AU=0;X=Y=0;W=null;$('wz').hidden=true};$('wzk').onclick=function(){AU=0;X=Y=0;if(W.s>0){W.s--;wzDraw()}else wzGo(-1)};
 function wzSet(h,f){$('wzb').innerHTML=h+'<div class="wzf">'+f+'</div>';var p=$('wzb').querySelector('.pad');if(p)padOn(p);$('wzbar').style.width=(W.i/6*100)+'%';$('wzk').style.visibility=W.i||W.s?'visible':'hidden';$('wz').scrollTop=0;wzLive()}
 var PAD='<div class="pad"><div class="kn"></div></div><div class="tr"></div>',NX='<button class="pr" onclick="wzGo(1)">',SK='<button class="gh" onclick="wzGo(1)">Skip for now</button>';
@@ -317,7 +317,7 @@ if(e==0&&h0&&h1&&!W.re){wzSet('<span class="lb">Step '+(4+a)+' of 6 · '+(a?'Up 
 NX+'Keep them</button><button onclick="q(\'/lim?a='+(a?'t':'p')+'&e=c\').then(function(){W.re=1;wzDraw()})">Set them again</button>');return}
 if(e>1){W.re=0;wzSet('<span class="lb">Step '+(4+a)+' of 6</span><h2>'+(a?'Tilt':'Pan')+' limits saved.</h2><p>Try it: push the stick all the way each side. The head eases to a stop at each end.</p><div class="fig">'+dial(a)+'</div><div class="rd" id="dR"></div>'+PAD,NX+'Next</button><button class="gh" onclick="wzRe('+a+')">Not right? Clear and set them again</button>');return}
 wzSet('<span class="lb">Step '+(4+a)+' of 6 · '+(a?'Up and down':'Left and right')+' limits</span><h2>Drive '+n[e]+' to the furthest safe point.</h2><p>Go slowly. Stop before a cable pulls tight or the camera touches anything'+(a?'.':', then leave a finger of slack.')+'</p><div class="fig">'+dial(a)+'</div><div class="rd" id="dR"></div>'+PAD,
-'<button class="pr" onclick="q(\'/lim?a='+(a?'t':'p')+'&e='+n[e+2]+'\').then(function(){W.s++;wzDraw()})">Set the '+n[e+4]+' limit here</button>'+(e==0?SK:'<button class="gh" onclick="wzRe('+a+')">Wrong spot? Clear and start this step over</button>'))}
+'<button class="pr" onclick="wzLim('+a+','+e+')">Set the '+n[e+4]+' limit here</button>'+(e==0?SK:'<button class="gh" onclick="wzRe('+a+')">Wrong spot? Clear and start this step over</button>'))}
 if(k=='gear'){var m=W.m;if(!m){wzSet('<span class="lb">Step 3 of 6 · Gears</span><h2>How far does the camera turn for each motor turn?</h2><p>With this the head knows real angles, so speeds read in degrees per second and tracking is calibrated.</p>'+
 '<button class="opt" onclick="W.m={a:0,g:90};wzDraw()"><b>Measure it for me</b><small>The head turns the camera slowly by itself. You tap Stop when it has turned a quarter turn, and the head does the maths. About a minute per axis.</small></button>'+
 '<button class="opt" onclick="W.m={k:1};wzDraw()"><b>I know the numbers</b><small>Type the motor turns per camera turn for pan and tilt.</small></button>'+(s.gp>0&&s.gt>0?'<div class="tip">Saved now: pan <b class="n">'+s.gp.toFixed(2)+'</b>, tilt <b class="n">'+s.gt.toFixed(2)+'</b></div>':''),(s.gp>0&&s.gt>0?NX+'Keep these</button>':SK));return}
@@ -336,7 +336,12 @@ FEEL.forEach(function(f,i){var v=feel(i);o+='<button class="opt'+(i==cur?' on':'
 wzSet('<span class="lb">Step 6 of 6 · Movement feel</span><h2>How should the camera move?</h2><p>Worked out for your gears. Pick one and try it on the stick; change it any time.</p>'+o+PAD,NX+(cur<0?'Keep my own numbers':'Finish')+'</button>')}
 if(k=='done'){var st=steps(s),n=st.filter(function(x){return x[2]}).length,l='';st.forEach(function(x){l+='<div class="hl '+(x[2]?'':'wn')+'"><span>'+x[0]+'<small>'+esc(x[1])+'</small></span></div>'});
 wzSet('<h2>'+(n==6?'The head is ready.':'Saved. '+(6-n)+' step'+(n==5?'':'s')+' still open.')+'</h2><p>'+(n==6?'It knows its directions, its centre, how far it may travel and how fast to move. Save a few presets next: aim, then tap an empty preset.':'You can finish the open ones any time from the Setup tab.')+'</p><div class="c" style="margin-top:8px">'+l+'</div>','<button class="pr" onclick="$(\'wzx\').onclick();go(\'control\')">Go to the controls</button>')}}
-function wzRe(a){q('/lim?a='+(a?'t':'p')+'&e=c').then(function(){W.s=0;W.re=1;wzDraw()})}
+// Saving an end. If the camera got there by pushing the stick the other way, the stick is reversed: say so and fix it
+// first, otherwise the end would be saved on the wrong side.
+function wzLim(a,e){var n=a?['d','u','down','up']:['l','r','left','right'],now=a?S.tt:S.pt,d=now-(W.p0==null?now:W.p0),wrong=e==0?d>.03:d<-.03,
+go=function(){q('/lim?a='+(a?'t':'p')+'&e='+n[e]).then(function(){W.s++;W.p0=null;wzDraw()})};
+if(wrong)sheet({t:(a?'Up and down':'Left and right')+' look reversed',p:'You were asked to drive '+n[e+2]+', and the stick was pushed '+n[3-e]+' to get here. If the camera really did go '+n[e+2]+', this stick is back to front. Fix it now? The '+n[e+2]+' limit is then saved here.',b:[['Yes, fix the stick and save','pr',function(){q('/set?inv'+(a?'t':'p')+'=1').then(go)}],['No, the stick is right: save as it is','',go]]});else go()}
+function wzRe(a){q('/lim?a='+(a?'t':'p')+'&e=c').then(function(){W.s=0;W.re=1;W.p0=null;wzDraw()})}
 function wzDir(flip){var up=W.s%2==1,box=W.s>1;if(flip){q(box?'/boxflip?a='+(up?'u':'l'):'/set?inv'+(up?'t':'p')+'=1').then(function(){ask('Fixed. Try it again.','Push the '+(box?'joystick box ':'')+'stick '+(up?'up':'right')+' once more to check.','OK',function(){})});return}
 if(W.s<(S.jon?3:1)){W.s++;wzDraw()}else q('/set?sd='+(S.sd|1)).then(function(){wzGo(1)})}
 var AU=0,AUt=0,AUp=0;
@@ -345,7 +350,7 @@ function wzAuto(){var m=W.m;if(AU){AU=0;X=Y=0}else{AU=1;AUt=Date.now();AUp=m.a?S
 function wzNudge(d){if(AU)wzAuto();var m=W.m;if(m.a)Y=d*.35;else X=d*.35;setTimeout(function(){if(!AU)X=Y=0},300)}
 function wzGearDone(){AU=0;X=Y=0;var m=W.m,d=(m.a?S.tt:S.pt)-m.p0;if(Math.abs(d)<.15){ask('The motor has hardly moved','Tap Start turning and let the camera turn '+m.g+'° from the starting mark, then tap Done.','OK',function(){});return}m.d=d;m.r=Math.abs(d)*360/m.g;wzDraw()}
 function wzGearSave(){var m=W.m;q('/set?'+(m.a?'gt':'gp')+'='+m.r.toFixed(2)).then(function(){if(m.a)wzGo(1);else{W.m={a:1,g:30};wzDraw()}})}
-function wzLive(){if(!W||!S.lm)return;var k=WZ[W.i];if(k=='pan')dialDraw(0);if(k=='tilt')dialDraw(1);if(k=='ctr'&&$('dR0'))$('dR0').innerHTML='<span>pan <b class="n">'+pos(0,S.pt)+'</b></span><span>tilt <b class="n">'+pos(1,S.tt)+'</b></span>';
+function wzLive(){if(!W||!S.lm)return;var k=WZ[W.i];if((k=='pan'||k=='tilt')&&W.p0==null&&W.s<2)W.p0=k=='tilt'?S.tt:S.pt;if(k=='pan')dialDraw(0);if(k=='tilt')dialDraw(1);if(k=='ctr'&&$('dR0'))$('dR0').innerHTML='<span>pan <b class="n">'+pos(0,S.pt)+'</b></span><span>tilt <b class="n">'+pos(1,S.tt)+'</b></span>';
 if(k=='gear'&&$('gN')&&W.m&&W.m.p0!=null){var c=W.m.a?S.tt:S.pt;$('gN').textContent=Math.abs(c-W.m.p0).toFixed(2);if(AU&&Date.now()-AUt>2500){if(Math.abs(c-AUp)<.01){wzAuto();$('gT').hidden=false}AUt=Date.now();AUp=c}}}
 // ---- live update progress
 try{U=JSON.parse(sessionStorage.x70up||'null')}catch(e){}if(U&&Date.now()-U.t0>600000)U=null;

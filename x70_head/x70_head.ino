@@ -278,8 +278,9 @@ void setMotors(bool on) {
 void stopAll() { Lock l; stickClear(); for (Axis *x : AX) { x->webCmd = x->viscaCmd = 0; if (x->going) { x->going = false; if (x->st) x->st->stopMove(); } } }
 
 long clampToLimits(const Axis &x, long p) {
-  if (x.hasLo && p < x.lo) p = x.lo;
-  if (x.hasHi && p > x.hi) p = x.hi;
+  if (!limited(x)) return p;               // one end alone is only remembered: nothing is fenced in until both are set
+  if (p < x.lo) p = x.lo;
+  if (p > x.hi) p = x.hi;
   return p;
 }
 
@@ -347,8 +348,8 @@ void motionTick(float dt) {
     // limits: the closer to the end, the slower it may go toward it
     long pos = x.st->getCurrentPosition();
     float brake = maxSps() / STOP_TIME;
-    if (x.v > 0 && x.hasHi) { float d = (float)(x.hi - pos) - 3.0f * MICROSTEPS; float lim = d > 0 ? sqrtf(2.0f * brake * d) : 0; if (x.v > lim) { x.v = lim; if (x.a > 0) x.a = 0; if (lim == 0 && target > 0) why = WHY_LIMIT_HI; } }
-    if (x.v < 0 && x.hasLo) { float d = (float)(pos - x.lo) - 3.0f * MICROSTEPS; float lim = d > 0 ? sqrtf(2.0f * brake * d) : 0; if (-x.v > lim) { x.v = -lim; if (x.a < 0) x.a = 0; if (lim == 0 && target < 0) why = WHY_LIMIT_LO; } }
+    if (x.v > 0 && x.hasHi && x.hasLo) { float d = (float)(x.hi - pos) - 3.0f * MICROSTEPS; float lim = d > 0 ? sqrtf(2.0f * brake * d) : 0; if (x.v > lim) { x.v = lim; if (x.a > 0) x.a = 0; if (lim == 0 && target > 0) why = WHY_LIMIT_HI; } }
+    if (x.v < 0 && x.hasLo && x.hasHi) { float d = (float)(pos - x.lo) - 3.0f * MICROSTEPS; float lim = d > 0 ? sqrtf(2.0f * brake * d) : 0; if (-x.v > lim) { x.v = -lim; if (x.a < 0) x.a = 0; if (lim == 0 && target < 0) why = WHY_LIMIT_LO; } }
     float s = fabsf(x.v);
     if (s >= 1.0f && why == WHY_EASING) why = WHY_MOVING;
     whyCode[ai] = why;
@@ -672,8 +673,10 @@ void webSetup() {
       else {
         bool userHigh = (e == "r" || e == "u");                 // right / up = the + end as you see it
         bool motorHigh = x.invert ? !userHigh : userHigh;
-        if (motorHigh) { x.hi = pos; x.hasHi = true; if (x.hasLo && x.lo > pos) x.hasLo = false; }
-        else           { x.lo = pos; x.hasLo = true; if (x.hasHi && x.hi < pos) x.hasHi = false; }
+        if (motorHigh) { x.hi = pos; x.hasHi = true; } else { x.lo = pos; x.hasLo = true; }
+        // Two ends make a range whichever was called what: the smaller position is the low end. So a stick that
+        // was reversed while the ends were set cannot fence the head out of its own range.
+        if (x.hasLo && x.hasHi && x.lo > x.hi) { long t = x.lo; x.lo = x.hi; x.hi = t; ev("%s limits were set the other way round: swapped", x.name); }
       }
       saveLimits(x);
       ev("%s limit %s at %ld: lo %ld%c hi %ld%c inv %d", x.name, e.c_str(), pos, x.lo, x.hasLo ? '*' : ' ', x.hi, x.hasHi ? '*' : ' ', (int)x.invert);
