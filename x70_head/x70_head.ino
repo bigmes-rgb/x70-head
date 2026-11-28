@@ -25,6 +25,7 @@ const char *FW_SITE = "https://bigmes-rgb.github.io/x70-head/";
 const char *AP_NAME = "X70-Head";
 const char *DEFAULT_PASS = "x70head123";   // device password until you change it on the Wi-Fi page
 
+#include <esp_wifi.h>
 #include <stdarg.h>
 #include <esp_system.h>
 #include <WiFi.h>
@@ -203,7 +204,7 @@ void setMotors(bool on);
 // ---------------- event log ----------------
 // The last things that happened, with the time since power-up. Shown on the page ("Recent events") so that an odd
 // movement can be traced to its cause afterwards.
-const int NEV = 48;
+const int NEV = 96;
 char evBuf[NEV][76]; int evHead = 0, evCount = 0;
 void ev(const char *fmt, ...) {
   char m[60]; va_list ap; va_start(ap, fmt); vsnprintf(m, sizeof m, fmt, ap); va_end(ap);
@@ -394,10 +395,11 @@ void viscaPoll() {
   static uint8_t buf[32]; static int len = 0;
   uint8_t out[24];
   // TCP (Face Tracker PTZ "VISCA over TCP")
+  static bool obsWas = false;
   if (!viscaClient || !viscaClient.connected()) {
-    if (viscaClient) { viscaClient.stop(); pan.viscaCmd = tilt.viscaCmd = 0; len = 0; ev("OBS disconnected"); }     // tracker went away: stop
+    if (obsWas) { obsWas = false; viscaClient.stop(); pan.viscaCmd = tilt.viscaCmd = 0; len = 0; ev("OBS disconnected (it reconnects when replies are late)"); }     // tracker went away: stop
     WiFiClient c = viscaTcp.accept();
-    if (c) { viscaClient = c; viscaClient.setNoDelay(true); len = 0; ev("OBS connected from %s", c.remoteIP().toString().c_str()); }
+    if (c) { obsWas = true; viscaClient = c; viscaClient.setNoDelay(true); len = 0; ev("OBS connected from %s", c.remoteIP().toString().c_str()); }
   }
   if (viscaClient && viscaClient.connected()) {
     int guard = 64;
@@ -678,6 +680,10 @@ void webSetup() {
   web.begin();
 }
 
+// The radio must never doze between packets: a dozing radio hears a burst (the stick being moved) but misses single
+// packets (heartbeats, OBS commands), which shows up as the joystick box "going offline" and OBS reconnecting.
+// The setting is lost whenever the radio restarts, so it is applied again after every join.
+void radioAwake() { WiFi.setSleep(false); esp_wifi_set_ps(WIFI_PS_NONE); }
 bool joinSavedWifi() {                         // two remembered networks: joins whichever is in range, the stronger one first
   const String *ss[2] = {&wifiSsid, &wifiSsid2}, *pp[2] = {&wifiPass, &wifiPass2};
   if (!wifiSsid.length() && !wifiSsid2.length()) return false;
@@ -693,8 +699,8 @@ bool joinSavedWifi() {                         // two remembered networks: joins
     WiFi.begin(ss[j]->c_str(), pp[j]->c_str());
     for (int i = 0; i < (rssi[j] == -999 ? 16 : 40) && WiFi.status() != WL_CONNECTED; i++) { delay(500); Serial.print('.'); }
     Serial.println();
-    if (WiFi.status() == WL_CONNECTED) return true;
-    WiFi.disconnect(true); delay(200); WiFi.mode(WIFI_STA);
+    if (WiFi.status() == WL_CONNECTED) { radioAwake(); return true; }
+    WiFi.disconnect(true); delay(200); WiFi.mode(WIFI_STA); WiFi.setSleep(false);
   }
   return false;
 }
@@ -751,8 +757,10 @@ void setup() {
 
 void loop() {
   if (updMode) { web.handleClient(); delay(2); return; }      // update in progress: only the page is served
-  static uint32_t lastTick = 0;
+  static uint32_t lastTick = 0, lastPass = 0, lastBusyEv = 0;
   uint32_t now = millis();
+  if (lastPass != 0 && now - lastPass > 250 && (lastBusyEv == 0 || now - lastBusyEv > 5000)) { lastBusyEv = now; ev("head was busy for %u ms (nothing heard meanwhile)", (unsigned)(now - lastPass)); }
+  lastPass = now;
   if (now - lastTick >= 10) { float dt = (now - lastTick) * 0.001f; if (dt > 0.05f) dt = 0.05f; lastTick = now; motionTick(dt); }
   web.handleClient();
   ArduinoOTA.handle();
@@ -791,9 +799,12 @@ void loop() {
     lastEvCheck = now;
     static bool jonWas = false, wifiWas = true; static int srcWas = 0; static uint32_t lastTrkEv = 0;
     bool jon = joySeenMs != 0 && now - joySeenMs < 6000;
-    if (jon != jonWas) { jonWas = jon; ev(jon ? "joystick box online (build %d)" : "joystick box OFFLINE", joyBuild); }
+    if (jon != jonWas) { jonWas = jon; if (jon) ev("joystick box online (build %d)", joyBuild); else ev("joystick box OFFLINE: silent 6 s, Wi-Fi %d dBm", (int)WiFi.RSSI()); }
     bool wf = WiFi.getMode() != WIFI_STA || WiFi.status() == WL_CONNECTED;
-    if (wf != wifiWas) { wifiWas = wf; ev(wf ? "Wi-Fi back" : "Wi-Fi LOST: head stops"); }
+    if (wf != wifiWas) { wifiWas = wf; if (wf) { radioAwake(); ev("Wi-Fi back, %d dBm", (int)WiFi.RSSI()); } else ev("Wi-Fi LOST: head stops"); }
+    // Once, a little after start-up: the facts about the radio link.
+    static bool linkSaid = false;
+    if (!linkSaid && wf && now > 8000 && WiFi.getMode() == WIFI_STA) { linkSaid = true; wifi_ps_type_t ps = WIFI_PS_NONE; esp_wifi_get_ps(&ps); ev("Wi-Fi %s %d dBm ch %d, doze %s", WiFi.SSID().substring(0, 12).c_str(), (int)WiFi.RSSI(), (int)WiFi.channel(), ps == WIFI_PS_NONE ? "off" : "ON"); }
     int src = (pan.webCmd != 0 || tilt.webCmd != 0) ? (stickFromBox ? 1 : 2) : ((trackingOn && (pan.viscaCmd != 0 || tilt.viscaCmd != 0) && (int32_t)(manualUntil - now) <= 0) ? 3 : 0);
     if (src != srcWas) {
       if (src == 1) ev("moving: joystick box");

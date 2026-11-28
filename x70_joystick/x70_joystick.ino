@@ -31,6 +31,7 @@ const char *DEFAULT_PASS = "x70head123";   // device password until you change i
 
 // Stick directions are settings on the box's own page (http://x70joystick.local), not in this code.
 
+#include <esp_wifi.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <Preferences.h>
@@ -126,6 +127,10 @@ g('m').textContent='Waiting for it to come back: '+s+' s';if(s>%LATE%)g('n').hid
 String waitPage(const char *head, const char *note, const char *ping, int late) {
   String h = FPSTR(WAITPAGE); h.replace("%HEAD%", head); h.replace("%NOTE%", note); h.replace("%PING%", ping); h.replace("%LATE%", String(late)); return h;
 }
+// The radio must never doze between packets: a dozing radio hears a burst (the stick being moved) but misses single
+// packets (heartbeats, OBS commands), which shows up as the joystick box "going offline" and OBS reconnecting.
+// The setting is lost whenever the radio restarts, so it is applied again after every join.
+void radioAwake() { WiFi.setSleep(false); esp_wifi_set_ps(WIFI_PS_NONE); }
 bool joinSavedWifi() {                         // two remembered networks: joins whichever is in range, the stronger one first
   const String *ss[2] = {&wifiSsid, &wifiSsid2}, *pp[2] = {&wifiPass, &wifiPass2};
   if (!wifiSsid.length() && !wifiSsid2.length()) return false;
@@ -141,8 +146,8 @@ bool joinSavedWifi() {                         // two remembered networks: joins
     WiFi.begin(ss[j]->c_str(), pp[j]->c_str());
     for (int i = 0; i < (rssi[j] == -999 ? 16 : 40) && WiFi.status() != WL_CONNECTED; i++) { delay(500); Serial.print('.'); }
     Serial.println();
-    if (WiFi.status() == WL_CONNECTED) return true;
-    WiFi.disconnect(true); delay(200); WiFi.mode(WIFI_STA);
+    if (WiFi.status() == WL_CONNECTED) { radioAwake(); return true; }
+    WiFi.disconnect(true); delay(200); WiFi.mode(WIFI_STA); WiFi.setSleep(false);
   }
   return false;
 }
@@ -289,7 +294,7 @@ void loop() {
     // After start-up, and after the Wi-Fi comes back, nothing is sent until the stick has been seen at rest for half
     // a second. A stick that reads "pushed" at that moment is a fault, not a command.
     static bool armed = false; static uint32_t restSince = 0; static bool wifiWas = false;
-    if (wifi && !wifiWas) { armed = false; restSince = 0; }
+    if (wifi && !wifiWas) { armed = false; restSince = 0; radioAwake(); }
     wifiWas = wifi;
     if (!armed) {
       if (moving) restSince = 0;
