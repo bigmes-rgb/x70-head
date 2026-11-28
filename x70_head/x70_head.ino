@@ -25,6 +25,7 @@ const char *FW_SITE = "https://bigmes-rgb.github.io/x70-head/";
 const char *AP_NAME = "X70-Head";
 const char *DEFAULT_PASS = "x70head123";   // device password until you change it on the Wi-Fi page
 
+#include <lwip/sockets.h>
 #include <esp_wifi.h>
 #include <stdarg.h>
 #include <esp_system.h>
@@ -123,6 +124,9 @@ SemaphoreHandle_t motLock = NULL, evLock = NULL;
 struct Lock { Lock() { if (motLock) xSemaphoreTakeRecursive(motLock, portMAX_DELAY); } ~Lock() { if (motLock) xSemaphoreGiveRecursive(motLock); } };
 volatile bool obsUp = false;        // OBS has its connection open
 uint32_t ctlMaxMs = 0;              // longest pause of the control task
+volatile uint32_t ctlAliveMs = 0;   // when the control task last went round
+uint32_t secMax[4] = {0, 0, 0, 0};  // the longest each part of the control task ever took, ms: waiting for the lock, movement, OBS, joystick box
+uint32_t obsDropped = 0, obsKicked = 0;   // replies to OBS that could not be sent at once; times a stuck OBS connection was closed
 
 // ---- telemetry: what each axis was asked to do on the last motion tick, what it did, and what stopped it
 enum { WHY_IDLE = 0, WHY_MOVING, WHY_NO_MOTOR, WHY_MOTORS_OFF, WHY_PRESET, WHY_LIMIT_HI, WHY_LIMIT_LO, WHY_EASING };
@@ -448,7 +452,22 @@ void viscaPoll() {
     while (viscaClient.available() && guard--) {
       uint8_t b = viscaClient.read();
       if (len < (int)sizeof buf) buf[len++] = b; else len = 0;
-      if (b == 0xFF) { int r = viscaHandle(buf, len, out); if (r) viscaClient.write(out, r); len = 0; }
+      if (b == 0xFF) {
+        int r = viscaHandle(buf, len, out); len = 0;
+        // The reply must never make the head wait. A normal write waits up to ten seconds when the other end has
+        // stopped listening (OBS busy or reconnecting, a Wi-Fi hiccup), and the motors waited with it. This send
+        // returns at once; a connection that takes no replies for two seconds is closed so that OBS starts afresh.
+        static uint32_t stuckSince = 0;
+        if (r) {
+          int n = lwip_send(viscaClient.fd(), out, r, MSG_DONTWAIT);
+          if (n == r) stuckSince = 0;
+          else {
+            obsDropped++;
+            if (stuckSince == 0) stuckSince = millis() | 1;
+            else if (millis() - stuckSince > 2000) { stuckSince = 0; obsKicked++; obsUp = false; viscaClient.stop(); pan.viscaCmd = tilt.viscaCmd = 0; ev("OBS connection stuck (takes no replies): closed"); break; }
+          }
+        }
+      }
     }
   }
   // UDP (PTZ Controls "VISCA over IP", Sony style: 8-byte header, then the VISCA packet)
@@ -692,7 +711,7 @@ void webSetup() {
   });
   web.on("/diag", []() {                                // everything about why the head is or is not moving, as text to copy
     static const char *WHY[] = {"idle (no command)", "moving", "no stepper", "REFUSED: motors off", "driving to a preset / map point", "REFUSED: at the motor's HIGH limit", "REFUSED: at the motor's LOW limit", "starting / stopping"};
-    String t; t.reserve(1900); char l[200]; uint32_t now = millis();
+    String t; t.reserve(2300); char l[260]; uint32_t now = millis();
     snprintf(l, sizeof l, "X70 head build %d, up %lu s. motors %s, tracking %s, manual hold %ld ms, OBS %s, top %d RPM, slow cap %d RPM\n", FW_BUILD, now / 1000, motorsOn ? "ON" : "OFF", trackingOn ? "allowed" : "blocked", (long)(int32_t)(manualUntil - now), obsUp ? "connected" : "not connected", (int)maxRpm, (int)SLOW_CAP_RPM); t += l;
     for (int i = 0; i < 2; i++) {
       Axis &x = *AX[i];
@@ -701,6 +720,7 @@ void webSetup() {
       snprintf(l, sizeof l, "  motor position %ld steps. motor low limit %s %ld, motor high limit %s %ld, cap %.0f steps/s\n  commands: page-or-box stick %.0f, OBS %.0f, preset move %d\n", pos, x.hasLo ? "SET" : "none", x.lo, x.hasHi ? "SET" : "none", x.hi, capSps(x), x.webCmd, x.viscaCmd, (int)x.going); t += l;
     }
     snprintf(l, sizeof l, "sticks: page pan %.0f tilt %.0f (last heard %ld ms ago, %lu packets), box pan %.0f tilt %.0f (last heard %ld ms ago, %lu packets)\n", stickCmd[0][0], stickCmd[0][1], stickMs[0] ? (long)(now - stickMs[0]) : -1L, (unsigned long)stickCount[0], stickCmd[1][0], stickCmd[1][1], stickMs[1] ? (long)(now - stickMs[1]) : -1L, (unsigned long)stickCount[1]); t += l;
+    snprintf(l, sizeof l, "movement task, longest ever per part: lock wait %lu ms, movement %lu ms, OBS link %lu ms, joystick link %lu ms. OBS replies not sent %lu, stuck OBS connections closed %lu\n", (unsigned long)secMax[0], (unsigned long)secMax[1], (unsigned long)secMax[2], (unsigned long)secMax[3], (unsigned long)obsDropped, (unsigned long)obsKicked); t += l;
     snprintf(l, sizeof l, "Wi-Fi %d dBm, free memory %d KB, longest pause: movement task %lu ms, web side %lu ms, page requests %lu\nlast requests (seconds since power-up):\n", (int)WiFi.RSSI(), (int)(ESP.getFreeHeap() / 1024), (unsigned long)ctlMaxMs, (unsigned long)loopMaxMs, (unsigned long)httpCount); t += l;
     for (int i = 0; i < 10; i++) { const char *r = reqLog[(reqHead + i) % 10]; if (r[0]) { t += "  "; t += r; t += '\n'; } }
     web.sendHeader("Cache-Control", "no-store"); web.send(200, "text/plain", t);
@@ -837,12 +857,22 @@ void controlTask(void *) {
   for (;;) {
     uint32_t now = millis();
     if (now - lastPass > ctlMaxMs) ctlMaxMs = now - lastPass;
-    lastPass = now;
+    lastPass = now; ctlAliveMs = now | 1;
     {
+      uint32_t t0 = millis();
       Lock l;
+      uint32_t t1 = millis();
       if (now - lastTick >= 10) { float dt = (now - lastTick) * 0.001f; if (dt > 0.05f) dt = 0.05f; lastTick = now; motionTick(dt); }
+      uint32_t t2 = millis();
       viscaPoll();
+      uint32_t t3 = millis();
       joyBoxPoll();
+      uint32_t t4 = millis(), d[4] = {t1 - t0, t2 - t1, t3 - t2, t4 - t3};
+      static uint32_t lastSlowEv = 0;
+      for (int i = 0; i < 4; i++) {
+        if (d[i] > secMax[i]) secMax[i] = d[i];
+        if (d[i] > 200 && (lastSlowEv == 0 || t4 - lastSlowEv > 5000)) { lastSlowEv = t4; static const char *nm[] = {"waiting for the web side", "movement", "OBS link", "joystick box link"}; ev("MOTORS HELD UP %lu ms by: %s", (unsigned long)d[i], nm[i]); }
+      }
     }
     vTaskDelay(pdMS_TO_TICKS(2));
   }
@@ -855,6 +885,11 @@ void loop() {
   if (lastPass != 0 && now - lastPass > 250 && (lastBusyEv == 0 || now - lastBusyEv > 5000)) { lastBusyEv = now; ev("web side was held up for %u ms (motors unaffected)", (unsigned)(now - lastPass)); }
   if (lastPass != 0 && now - lastPass > loopMaxMs) loopMaxMs = now - lastPass;
   lastPass = now;
+  // Safety net: if the movement task ever stops going round, the motors would carry on at their last speed with
+  // nobody steering. The web side notices within half a second and stops them.
+  { static bool stalled = false; bool st = ctlAliveMs != 0 && (int32_t)(now - ctlAliveMs) > 500;
+    if (st && !stalled) { for (Axis *x : AX) if (x->st && x->st->isRunning()) x->st->forceStop(); ev("MOVEMENT TASK STALLED: motors stopped"); }
+    stalled = st; }
   web.handleClient();
   ArduinoOTA.handle();
   // Automatic updates: look at GitHub every 10 minutes, but only while nothing is happening
