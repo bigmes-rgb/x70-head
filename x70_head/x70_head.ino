@@ -798,7 +798,7 @@ void loop() {
   }
   // joystick box still on an older build (it was off during the last update): tell it again, at most every 5 minutes
   bool still = !headMoving() && pan.viscaCmd == 0 && tilt.viscaCmd == 0 && pan.webCmd == 0 && tilt.webCmd == 0;
-  if (online && still && joyBuild > 0 && now - joySeenMs < 6000 &&
+  if (online && still && joyBuild > 0 && (int32_t)(now - joySeenMs) < 6000 &&
       (joyBuild < FW_BUILD || (quiet && autoUpdate && joyBuild < latestBuild)) &&            // the two always run the same build
       (lastJoyNudge == 0 || now - lastJoyNudge > 300000UL)) { lastJoyNudge = now; for (int i = 0; i < 3; i++) { tellJoystick("U"); delay(30); } }
   if (updateRequested && !headMoving() && chkState == 0) {
@@ -810,7 +810,7 @@ void loop() {
   if (now - lastEvCheck > 200) {
     lastEvCheck = now;
     static bool jonWas = false, wifiWas = true; static int srcWas = 0; static uint32_t lastTrkEv = 0;
-    bool jon = joySeenMs != 0 && now - joySeenMs < 6000;
+    bool jon = joySeenMs != 0 && (int32_t)(now - joySeenMs) < 6000;   // signed: the box may have spoken after "now" was read
     if (jon != jonWas) { jonWas = jon; if (jon) ev("joystick box online (build %d)", joyBuild); else ev("joystick box OFFLINE: silent 6 s, Wi-Fi %d dBm", (int)WiFi.RSSI()); }
     bool wf = WiFi.getMode() != WIFI_STA || WiFi.status() == WL_CONNECTED;
     if (wf != wifiWas) { wifiWas = wf; if (wf) { radioAwake(); ev("Wi-Fi back, %d dBm", (int)WiFi.RSSI()); } else ev("Wi-Fi LOST: head stops"); }
