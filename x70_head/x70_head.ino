@@ -648,6 +648,11 @@ Password<input id="pw" type="password" autocomplete="off">
 <h3>1. Start here</h3>
 <select id="shot"><option value="6">Waist-up shot</option><option value="11" selected>Full-body shot</option><option value="25">Wide stage shot</option></select>
 <button id="rec">Load the recommended settings for this shot</button>
+<h3>Who to follow</h3>
+<button id="lk" class="on">LOCK on the person at the yellow cross</button>
+<small>Aim the camera with the joystick so the person is on the yellow cross, then tap. The camera stays with that person and never picks anybody else by itself.</small>
+<button id="au2">Follow automatically again (the biggest person)</button>
+<div id="fm" class="warn"></div>
 <h3>2. Fix what you see</h3>
 <button data-fix="calm">Camera swings past the person and back &rarr; make it calmer</button>
 <button data-fix="fast">Camera is slow to bring the person back &rarr; make it quicker</button>
@@ -667,6 +672,7 @@ var P=[['track_y','Head room: face higher or lower',-0.5,0.5,0.01,'',0.15,0.35,'
 ['Kp_y_db','Tilt speed',20,80,1,' dB',0,0,'slow, may lag behind','fast, may bob up and down',1],
 ['zone_x','Rest zone, left and right',2,40,1,' %',8,15,'follows every small move','person can sit far off-centre',1],
 ['zone_y','Rest zone, up and down',2,40,1,' %',8,15,'bobs when the person nods','slow to follow up and down',1],
+['zone_strength','How firmly to bring the person back',0.6,1.6,0.1,'',0.8,1.3,'gentle, a fast walker may get away','firm, may look abrupt',1],
 ['zone_anticipation','Move with the person',0,1.2,0.05,'',0.7,1.05,'follows after the person has moved','may run ahead or hunt',1],
 ['lock_hold','Stay on the same person while hidden',1,60,1,' s',5,15,'may jump to someone else quickly','may follow nothing for a while',1],
 ['e_deadband_x','Still zone, left and right (zone framing off)',0,20,0.5,' %',1,4,'follows every small move','person can sit far off-centre',0],
@@ -730,6 +736,9 @@ function fmt(p,v){return(+v).toFixed(p[4]<0.1?2:(p[4]<1?1:0))+p[5]}
 function good(p){if(p[0]=='Kp_x_db')return[KP-5,KP+3];if(p[0]=='Kp_y_db')return[KP-8,KP];return[p[6],p[7]]}
 function note(p,v){var g=good(p);return v<g[0]?'<i class="hi">'+p[8]+'</i>':v>g[1]?'<i class="hi">'+p[9]+'</i>':'<i class="ok">good</i>'}
 function base(){var fov=+$('shot').value,s=+(H.tsc||0.2);return Math.max(25,Math.min(77,Math.round(20*Math.log10(fov*0.75*FPS/s))))}
+function fmode(){$('fm').textContent=FS.follow_mode=='manual'?'Manual: staying on the person you locked.':'Automatic: following the biggest person in the search area.'}
+$('lk').onclick=function(){setv('follow_mode','manual');setv('lock_request',Date.now()%1000000000);fmode();os('Lock sent. The green box should now be on that person.')};
+$('au2').onclick=function(){setv('follow_mode','auto');fmode()};
 function setv(k,v){FS[k]=v;clearTimeout(tm[k]);tm[k]=setTimeout(function(){var o={};o[k]=v;req('SetSourceFilterSettings',{sourceName:SRC,filterName:FLT,filterSettings:o,overlay:true}).catch(function(e){os('OBS error: '+e)})},120)}
 function build(){os('Connected: filter "'+FLT+'" on "'+SRC+'", OBS at '+FPS.toFixed(0)+' fps.');$('ob').hidden=false;var h=['',''];
 P.forEach(function(p){var g=good(p);h[p[10]?0:1]+='<label>'+p[1]+' <b id="v_'+p[0]+'"></b></label><input type="range" id="s_'+p[0]+'" min="'+p[2]+'" max="'+p[3]+'" step="'+p[4]+'"><small id="n_'+p[0]+'"></small>'});$('sl').innerHTML=h[0];$('sl2').innerHTML=h[1];
@@ -739,14 +748,14 @@ function nudge(k,d){var p=P.filter(function(x){return x[0]==k})[0],v=Math.max(p[
 var FIX={calm:[['Kp_x_db',-3],['Kp_y_db',-3]],fast:[['Kp_x_db',3],['Kp_y_db',3]],still:[['zone_x',2],['zone_y',2]],tight:[['zone_x',-2],['zone_y',-2]],late:[['zone_anticipation',0.1]],ahead:[['zone_anticipation',-0.15]]};
 Array.prototype.forEach.call(document.querySelectorAll('[data-fix]'),function(b){b.onclick=function(){FIX[b.dataset.fix].forEach(function(f){nudge(f[0],f[1])});os('Changed. Watch the camera for a minute before changing it again.')}});
 $('shot').onchange=function(){KP=base();if(SRC)paint()};
-function paint(){KP=base();P.forEach(function(p){var v=FS[p[0]];if(v===undefined)v=0;$('s_'+p[0]).value=v;show1(p,+v)});
+function paint(){fmode();KP=base();P.forEach(function(p){var v=FS[p[0]];if(v===undefined)v=0;$('s_'+p[0]).value=v;show1(p,+v)});
 $('en').textContent=FS._en?'Plugin tracking is ON (tap to switch off)':'Plugin tracking is OFF (tap to switch on)';$('en').className=FS._en?'on':'sv';
 $('ix').textContent='Reverse pan direction: '+(FS.invert_x?'ON':'off');$('iy').textContent='Reverse tilt direction: '+(FS.invert_y?'ON':'off')}
 $('en').onclick=function(){var v=!FS._en;req('SetSourceFilterEnabled',{sourceName:SRC,filterName:FLT,filterEnabled:v}).then(function(){FS._en=v;paint()},function(e){os('OBS error: '+e)})};
 $('ix').onclick=function(){setv('invert_x',!FS.invert_x);paint()};$('iy').onclick=function(){setv('invert_y',!FS.invert_y);paint()};
 // Start values: loop gain about 1 per second for the chosen shot width, the OBS frame rate and the head's speed scale.
 function rec(){var fov=+$('shot').value,s=+(H.tsc||0.2),kp=base();KP=kp;
-var v={Kp_x_db:kp,Kp_y_db:Math.max(20,kp-3),e_deadband_x:2,e_nonlinear_x:4,e_deadband_y:4,e_nonlinear_y:6,track_x:0,track_y:fov<8?0.2:0.25,Ki_x:0.2,Ki_y:0.2,Td_x:0.25,Td_y:0.25,Tdlpf:2,track_fps:12,lock_hold:10,detect_interval:1,zone_mode:true,zone_x:10,zone_y:10,zone_anticipation:1,e_deadband_z:50,Ki_z:0,Td_z:0,Kp_z_db:-40};
+var v={Kp_x_db:kp,Kp_y_db:Math.max(20,kp-3),e_deadband_x:2,e_nonlinear_x:4,e_deadband_y:4,e_nonlinear_y:6,track_x:0,track_y:fov<8?0.2:0.25,Ki_x:0.2,Ki_y:0.2,Td_x:0.25,Td_y:0.25,Tdlpf:2,track_fps:12,lock_hold:10,detect_interval:1,zone_mode:true,zone_x:10,zone_y:10,zone_anticipation:1,zone_strength:1,e_deadband_z:50,Ki_z:0,Td_z:0,Kp_z_db:-40};
 Object.assign(FS,v);req('SetSourceFilterSettings',{sourceName:SRC,filterName:FLT,filterSettings:v,overlay:true}).then(function(){paint();os('Recommended settings loaded for this shot.')},function(e){os('OBS error: '+e)})}
 $('rec').onclick=rec;$('go').onclick=connect;
 try{var sv=JSON.parse(localStorage.getItem('x70obs')||'null');if(sv){$('ip').value=sv.ip;$('port').value=sv.port;$('pw').value=sv.pw}}catch(e){}
