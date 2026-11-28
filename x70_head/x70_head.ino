@@ -684,32 +684,34 @@ Password<input id="pw" type="password" autocomplete="off">
 <small>Aim the camera with the joystick so the person is on the yellow cross, then tap. The camera stays with that person and never picks anybody else by itself.</small>
 <button id="au2">Follow automatically again (the biggest person)</button>
 <div id="fm" class="warn"></div>
-<h3>2. Fix what you see</h3>
-<button data-fix="still">Camera moves when the person only shifts a little &rarr; bigger rest zone</button>
-<button data-fix="tight">Person gets too far off-centre before it moves &rarr; smaller rest zone</button>
-<button data-fix="firm">A fast walker gets away from the camera &rarr; firmer</button>
-<button data-fix="soft">Camera moves look abrupt &rarr; gentler</button>
-<button data-fix="late">Camera follows after the person instead of with them &rarr; more anticipation</button>
-<button data-fix="ahead">Camera runs ahead of the person or hunts &rarr; less anticipation</button>
-<h3>3. Framing and movement</h3><div id="sl"></div>
-<details><summary>More settings (rarely needed)</summary><div id="sl2"></div>
+<h3>2. How the camera behaves</h3><div id="ch"></div><div id="sl" hidden></div>
+<details><summary>Exact numbers (used when a choice above is Custom)</summary><div id="sl2"></div>
 <button id="ix"></button><button id="iy"></button></details>
 </div></div>
 <script>
 var $=function(i){return document.getElementById(i)},H={},ws=null,rid=0,cb={},SRC='',FLT='',FS={},FPS=30,tm={};
 // key, label, min, max, step, unit, good-from, good-to, advice when below, advice when above, basic(1)/more(0)
-var P=[['head_top_pct','Head: distance from the top',5,60,1,' % of height',18,30,'head near the top edge','a lot of space above the head',1],
-['zone_w_pct','Rest zone: width',4,80,1,' % of width',15,30,'follows every small move','person can sit far off-centre',1],
-['zone_h_pct','Rest zone: height',4,80,1,' % of height',15,30,'bobs when the person nods','slow to follow up and down',1],
-['zone_strength','Bringing the person back (0.6 gentle, 1 normal, 1.6 firm)',0.6,1.6,0.1,'',0.8,1.6,'gentle, a fast walker may get away','',1],
-['zone_anticipation','When the person walks (0 wait, 1 travel with them)',0,1,0.1,'',0.6,1,'follows after the person has moved','',1],
-['pursuit_s','Keep turning after the person walks out of the picture',0,5,0.5,' s',1,3,'stops at once when the person is lost','may turn away from where they stopped',1],
-['search_b_pct','Search area: ignore the bottom (congregation)',0,80,1,' % of height',15,40,'people in the seats may be picked','a person low in the picture is missed',1],
-['lock_hold','Automatic: wait for a lost person before picking another',1,60,1,' s',5,15,'may jump to someone else quickly','may follow nobody for a while',1],
+var P=[['head_top_pct','Head: distance from the top',5,60,1,' % of height',18,30,'head near the top edge','a lot of space above the head',0],
+['zone_w_pct','Rest zone: width',4,80,1,' % of width',15,30,'follows every small move','person can sit far off-centre',0],
+['zone_h_pct','Rest zone: height',4,80,1,' % of height',15,30,'bobs when the person nods','slow to follow up and down',0],
+['zone_strength','Bringing the person back (0.6 gentle, 1 normal, 1.6 firm)',0.6,1.6,0.1,'',0.8,1.6,'gentle, a fast walker may get away','',0],
+['zone_anticipation','When the person walks (0 wait, 1 travel with them)',0,1,0.1,'',0.6,1,'follows after the person has moved','',0],
+['pursuit_s','Keep turning after the person walks out of the picture',0,5,0.5,' s',1,3,'stops at once when the person is lost','may turn away from where they stopped',0],
+['search_b_pct','Search area: ignore the bottom (congregation)',0,80,1,' % of height',15,40,'people in the seats may be picked','a person low in the picture is missed',0],
+['lock_hold','Automatic: wait for a lost person before picking another',1,60,1,' s',5,15,'may jump to someone else quickly','may follow nobody for a while',0],
 ['head_left_pct','Head: distance from the left',20,80,1,' % of width',45,55,'person sits left','person sits right',0],
 ['search_t_pct','Search area: ignore the top',0,80,1,' % of height',0,10,'','tall people are missed',0],
 ['search_l_pct','Search area: ignore the left side',0,80,1,' % of width',0,15,'','person is lost on the left',0],
 ['search_r_pct','Search area: ignore the right side',0,80,1,' % of width',0,15,'','person is lost on the right',0]];
+var C=[['headroom','Head room (space above the head)',[['tight','Tight (closer shots)'],['normal','Normal'],['generous','Generous (wide shots)'],['custom','Custom (number below)']]],
+['lead','Space in front of a walking person',[['off','None: always centred'],['some','A little'],['more','More'],['custom','Custom (number below)']]],
+['sensitivity','Sensitivity',[['low','Low: calm camera, ignores small movements'],['medium','Medium'],['high','High: follows small movements too'],['custom','Custom (numbers below)']]],
+['zone_strength','Speed',[[0.6,'Gentle: slow, smooth catching up'],[1,'Normal'],[1.6,'Firm: for people who move fast']]],
+['zone_anticipation','When the person walks',[[1,'Travel with them (like a camera operator)'],[0.6,'Travel with them, a little behind'],[0,'Only move once they are off-centre']]],
+['scope','The camera may',[['pt','Turn and tilt'],['pan','Turn only (tilt stays where the joystick left it)']]],
+['pursuit_s','If the person walks out of the picture',[[0,'Stop and wait'],[2,'Keep turning that way for 2 seconds'],[4,'Keep turning that way for 4 seconds']]],
+['seats','Seats in the bottom of the picture',[['none','None in view'],['low','A few heads'],['medium','Front rows'],['high','Many rows'],['custom','Custom (number below)']]],
+['lock_hold','Automatic: if the person is lost',[[5,'Wait 5 seconds, then follow somebody else'],[10,'Wait 10 seconds'],[30,'Wait 30 seconds']]]];
 var KP=56;
 function q(u){return fetch(u).then(function(r){return r.json()}).then(head).catch(function(){})}
 function head(s){H=s;var w='';if(!(s.gp>0)||!(s.gt>0))w='Gear ratios are not set on the head page, so tracking speeds are not calibrated. ';
@@ -768,17 +770,18 @@ P.forEach(function(p){var g=good(p);h[p[10]?0:1]+='<label>'+p[1]+' <b id="v_'+p[
 P.forEach(function(p){var e=$('s_'+p[0]);e.oninput=function(){var v=+e.value;show1(p,v);setv(p[0],v)}});paint()}
 function show1(p,v){var g=good(p);$('v_'+p[0]).innerHTML=fmt(p,v)+note(p,v);$('n_'+p[0]).textContent='Good: '+fmt(p,g[0])+' to '+fmt(p,g[1])}
 function nudge(k,d){var p=P.filter(function(x){return x[0]==k})[0],v=Math.max(p[2],Math.min(p[3],(+FS[k]||0)+d));setv(k,v);$('s_'+k).value=v;show1(p,v)}
-var FIX={still:[['zone_w_pct',4],['zone_h_pct',4]],tight:[['zone_w_pct',-4],['zone_h_pct',-4]],firm:[['zone_strength',0.3]],soft:[['zone_strength',-0.3]],late:[['zone_anticipation',0.2]],ahead:[['zone_anticipation',-0.2]]};
-Array.prototype.forEach.call(document.querySelectorAll('[data-fix]'),function(b){b.onclick=function(){FIX[b.dataset.fix].forEach(function(f){nudge(f[0],f[1])});os('Changed. Watch the camera for a minute before changing it again.')}});
+function buildC(){var h='';C.forEach(function(c){h+='<label>'+c[1]+'</label><select id="c_'+c[0]+'">'+c[2].map(function(o){return '<option value="'+o[0]+'">'+o[1]+'</option>'}).join('')+'</select>'});$('ch').innerHTML=h;
+C.forEach(function(c){$('c_'+c[0]).onchange=function(){var v=this.value;setv(c[0],typeof c[2][0][0]=='number'?+v:v)}})}
+function paintC(){C.forEach(function(c){var e=$('c_'+c[0]);if(e&&FS[c[0]]!==undefined)e.value=FS[c[0]]})}
 $('shot').onchange=function(){KP=base();if(SRC)paint()};
-function paint(){fmode();KP=base();P.forEach(function(p){var v=FS[p[0]];if(v===undefined)v=0;$('s_'+p[0]).value=v;show1(p,+v)});
+function paint(){fmode();if(!$('c_headroom'))buildC();paintC();KP=base();P.forEach(function(p){var v=FS[p[0]];if(v===undefined)v=0;$('s_'+p[0]).value=v;show1(p,+v)});
 $('en').textContent=FS._en?'Plugin tracking is ON (tap to switch off)':'Plugin tracking is OFF (tap to switch on)';$('en').className=FS._en?'on':'sv';
 $('ix').textContent='Reverse pan direction: '+(FS.invert_x?'ON':'off');$('iy').textContent='Reverse tilt direction: '+(FS.invert_y?'ON':'off')}
 $('en').onclick=function(){var v=!FS._en;req('SetSourceFilterEnabled',{sourceName:SRC,filterName:FLT,filterEnabled:v}).then(function(){FS._en=v;paint()},function(e){os('OBS error: '+e)})};
 $('ix').onclick=function(){setv('invert_x',!FS.invert_x);paint()};$('iy').onclick=function(){setv('invert_y',!FS.invert_y);paint()};
 // Start values: loop gain about 1 per second for the chosen shot width, the OBS frame rate and the head's speed scale.
 function rec(){
-var v={zone_mode:true,head_top_pct:25,head_left_pct:50,zone_w_pct:20,zone_h_pct:20,zone_strength:1,zone_anticipation:1,pursuit_s:2,lock_hold:10,person_model:'tiny',detector_engine:2};
+var v={zone_mode:true,headroom:'normal',lead:'some',sensitivity:'medium',zone_strength:1,zone_anticipation:1,scope:'pt',pursuit_s:2,lock_hold:10,person_model:'tiny',detector_engine:2};
 Object.assign(FS,v);req('SetSourceFilterSettings',{sourceName:SRC,filterName:FLT,filterSettings:v,overlay:true}).then(function(){paint();os('Recommended settings loaded. The search area was left as it is.')},function(e){os('OBS error: '+e)})}
 $('rec').onclick=rec;$('go').onclick=connect;
 try{var sv=JSON.parse(localStorage.getItem('x70obs')||'null');if(sv){$('ip').value=sv.ip;$('port').value=sv.port;$('pw').value=sv.pw}}catch(e){}
