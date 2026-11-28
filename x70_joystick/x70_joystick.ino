@@ -273,6 +273,10 @@ void loop() {
         wifiRestartAt = now + 1500;
       }
     }
+    else if (b[0] == 'F' && b[1] == '\t' && b[3] == '\t') {                   // the head's guided setup: turn one stick direction round
+      static int lastFlip = -1; int id = atoi(b + 4);                          // sent several times; act once
+      if (id != lastFlip) { lastFlip = id; if (b[2] == 'U') { flipUD = !flipUD; prefs.putBool("fly", flipUD); } else { flipLR = !flipLR; prefs.putBool("flx", flipLR); } }
+    }
     else if (b[0] == 'A') { headIP = cmdUdp.remoteIP(); headAckMs = now; headBuild = atoi(b + 2); }   // the head answered a heartbeat
   }
   // head not answering: look it up by its name (x70head.local). Only while the stick is at rest, it takes a moment.
@@ -290,7 +294,14 @@ void loop() {
     float x = swapAxes ? a : b, y = swapAxes ? b : a;           // side sensor = left/right, top sensor = up/down
     if (flipLR) x = -x;
     if (flipUD) y = -y;
-    bool moving = fabsf(x) > 0.05f || fabsf(y) > 0.05f;
+    // Steady readings: the sensors flicker a little, and near the rest position that flicker used to switch the
+    // stick between "pushed" and "let go" many times a second, which the camera showed as a jittery slow pan.
+    // The reading is smoothed, and "pushed" starts a little further out than where "let go" ends.
+    static float fx = 0, fy = 0; static bool pushed = false;
+    fx += 0.55f * (x - fx); fy += 0.55f * (y - fy); x = fx; y = fy;
+    float mag = fmaxf(fabsf(x), fabsf(y));
+    if (pushed ? mag < 0.045f : mag > 0.085f) pushed = !pushed;
+    bool moving = pushed;
     // After start-up, and after the Wi-Fi comes back, nothing is sent until the stick has been seen at rest for half
     // a second. A stick that reads "pushed" at that moment is a fault, not a command.
     static bool armed = false; static uint32_t restSince = 0; static bool wifiWas = false;

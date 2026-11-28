@@ -116,6 +116,14 @@ uint32_t lastWebMs = 0, manualUntil = 0, lastMoveMs = 0;
 // sends "zero" many times a second).
 float stickCmd[2][2] = {{0, 0}, {0, 0}}; uint32_t stickMs[2] = {0, 0};
 bool stickFromBox = false;               // who is moving the head by stick right now
+// ---- Two workers. Movement, the joystick box and OBS run in their own task ("control"), so that nothing the web page
+// does - sending a big page to a phone on a poor link can take many seconds - can hold up the motors. Anything
+// that touches the steppers or the limits takes this lock first; it is never held while talking to a browser.
+SemaphoreHandle_t motLock = NULL, evLock = NULL;
+struct Lock { Lock() { if (motLock) xSemaphoreTakeRecursive(motLock, portMAX_DELAY); } ~Lock() { if (motLock) xSemaphoreGiveRecursive(motLock); } };
+volatile bool obsUp = false;        // OBS has its connection open
+uint32_t ctlMaxMs = 0;              // longest pause of the control task
+
 // ---- telemetry: what each axis was asked to do on the last motion tick, what it did, and what stopped it
 enum { WHY_IDLE = 0, WHY_MOVING, WHY_NO_MOTOR, WHY_MOTORS_OFF, WHY_PRESET, WHY_LIMIT_HI, WHY_LIMIT_LO, WHY_EASING };
 int   whyCode[2] = {0, 0};          // one of the above, per axis (0 = pan, 1 = tilt)
@@ -221,11 +229,13 @@ void setMotors(bool on);
 const int NEV = 96;
 char evBuf[NEV][100]; int evHead = 0, evCount = 0;
 void ev(const char *fmt, ...) {
+  if (evLock) xSemaphoreTake(evLock, portMAX_DELAY);
   char m[88]; va_list ap; va_start(ap, fmt); vsnprintf(m, sizeof m, fmt, ap); va_end(ap);
   uint32_t t = millis() / 1000;
   snprintf(evBuf[evHead], sizeof evBuf[0], "%02u:%02u:%02u  %s", (unsigned)(t / 3600), (unsigned)(t / 60 % 60), (unsigned)(t % 60), m);
   Serial.println(evBuf[evHead]);
   evHead = (evHead + 1) % NEV; if (evCount < NEV) evCount++;
+  if (evLock) xSemaphoreGive(evLock);
 }
 bool driversDown = false;                // true while a driver is not answering (no 12 V)
 unsigned long lastDrvCheck = 0;
@@ -254,13 +264,14 @@ void driverWatch() {
   else if (!driversDown) { driversDown = true; setMotors(false); }
 }
 void setMotors(bool on) {
+  Lock l;
   if (!on) { stickClear(); for (Axis *x : AX) { if (x->st) x->st->forceStop(); x->v = x->a = 0; x->going = false; x->webCmd = x->viscaCmd = 0; } }
   digitalWrite(EN_PIN, on ? LOW : HIGH);
   motorsOn = on;
 }
 
 // ---------------- motion ----------------
-void stopAll() { stickClear(); for (Axis *x : AX) { x->webCmd = x->viscaCmd = 0; if (x->going) { x->going = false; if (x->st) x->st->stopMove(); } } }
+void stopAll() { Lock l; stickClear(); for (Axis *x : AX) { x->webCmd = x->viscaCmd = 0; if (x->going) { x->going = false; if (x->st) x->st->stopMove(); } } }
 
 long clampToLimits(const Axis &x, long p) {
   if (x.hasLo && p < x.lo) p = x.lo;
@@ -269,6 +280,7 @@ long clampToLimits(const Axis &x, long p) {
 }
 
 void gotoPos(long p, long t) {
+  Lock l;
   if (!motorsOn) return;
   long tgt[2] = {clampToLimits(pan, p), clampToLimits(tilt, t)};
   for (int i = 0; i < 2; i++) {
@@ -426,11 +438,10 @@ void viscaPoll() {
   static uint8_t buf[32]; static int len = 0;
   uint8_t out[24];
   // TCP (Face Tracker PTZ "VISCA over TCP")
-  static bool obsWas = false;
   if (!viscaClient || !viscaClient.connected()) {
-    if (obsWas) { obsWas = false; viscaClient.stop(); pan.viscaCmd = tilt.viscaCmd = 0; len = 0; ev("OBS disconnected (it reconnects when replies are late)"); }     // tracker went away: stop
+    if (obsUp) { obsUp = false; viscaClient.stop(); pan.viscaCmd = tilt.viscaCmd = 0; len = 0; ev("OBS disconnected (it reconnects when replies are late)"); }     // tracker went away: stop
     WiFiClient c = viscaTcp.accept();
-    if (c) { obsWas = true; viscaClient = c; viscaClient.setNoDelay(true); len = 0; ev("OBS connected from %s", c.remoteIP().toString().c_str()); }
+    if (c) { obsUp = true; viscaClient = c; viscaClient.setNoDelay(true); len = 0; ev("OBS connected from %s", c.remoteIP().toString().c_str()); }
   }
   if (viscaClient && viscaClient.connected()) {
     int guard = 64;
@@ -582,7 +593,7 @@ void sendStatus() {
     motorsOn, trackingOn, src, stepsToDeg(pan, pp), stepsToDeg(tilt, tp), pp / STEPS_PER_TURN, tp / STEPS_PER_TURN, pan.gear, tilt.gear,
     limited(pan), limited(tilt), pan.found, tilt.found, (int)maxRpm, ramp, trackScale, trackRamp, (int)WiFi.RSSI(),
     presetSet[0], presetSet[1], presetSet[2], presetSet[3], presetSet[4], presetSet[5],
-    FW_BUILD, autoUpdate, latestBuild, joyBuild, (int)(joySeenMs != 0 && millis() - joySeenMs < 6000), ipS.c_str(), jipS.c_str(), updMode ? (updStage ? (int)updStage : 1) : 0, (int)updPct, (int)updTry, chkState == 1, (int)((viscaClient && viscaClient.connected()) || (viscaLastMs != 0 && now - viscaLastMs < 3000)), joyScale, (int)(ESP.getFreeHeap() / 1024), (int)(ESP.getMaxAllocHeap() / 1024), fwMsg.c_str(),
+    FW_BUILD, autoUpdate, latestBuild, joyBuild, (int)(joySeenMs != 0 && millis() - joySeenMs < 6000), ipS.c_str(), jipS.c_str(), updMode ? (updStage ? (int)updStage : 1) : 0, (int)updPct, (int)updTry, chkState == 1, (int)(obsUp || (viscaLastMs != 0 && now - viscaLastMs < 3000)), joyScale, (int)(ESP.getFreeHeap() / 1024), (int)(ESP.getMaxAllocHeap() / 1024), fwMsg.c_str(),
     setupDone, pan.invert, tilt.invert,
     // the ends as the user sees them (left, right, down, up), in motor turns from centre
     pan.invert ? pan.hasHi : pan.hasLo, pan.invert ? pan.hasLo : pan.hasHi, tilt.invert ? tilt.hasHi : tilt.hasLo, tilt.invert ? tilt.hasLo : tilt.hasHi,
@@ -636,6 +647,7 @@ void webSetup() {
     Axis &x = web.arg("a") == "p" ? pan : tilt; String e = web.arg("e");
     { char n[40]; snprintf(n, sizeof n, "/lim a=%s e=%s", web.arg("a").c_str(), e.c_str()); reqNote(n); }
     if (x.st) {
+      Lock l;
       long pos = x.st->getCurrentPosition();
       if (e == "c") x.hasLo = x.hasHi = false;
       else {
@@ -650,6 +662,7 @@ void webSetup() {
     sendStatus();
   });
   web.on("/zero", []() {                                // here becomes 0,0; limits and presets keep their real places
+    Lock *zl = new Lock();
     for (int i = 0; i < 2; i++) {
       Axis &x = *AX[i];
       if (!x.st || x.st->isRunning()) continue;
@@ -658,6 +671,7 @@ void webSetup() {
       for (int n = 0; n < NPRESET; n++) { presetPos[n][i] -= pos; savePreset(n); }
       x.st->setCurrentPosition(0);
     }
+    delete zl;
     sendStatus();
   });
   web.on("/p", []() {
@@ -670,10 +684,16 @@ void webSetup() {
     }
     sendStatus();
   });
+  web.on("/boxflip", []() {                             // the joystick box turns one of its own stick directions round
+    static int id = 0; char m[24]; snprintf(m, sizeof m, "F\t%c\t%d", web.arg("a") == "u" ? 'U' : 'L', (int)(millis() & 0x7fff) + (++id));
+    for (int i = 0; i < 3; i++) { tellJoystick(m); delay(20); }
+    ev("joystick box asked to flip its %s", web.arg("a") == "u" ? "up/down" : "left/right");
+    sendStatus();
+  });
   web.on("/diag", []() {                                // everything about why the head is or is not moving, as text to copy
     static const char *WHY[] = {"idle (no command)", "moving", "no stepper", "REFUSED: motors off", "driving to a preset / map point", "REFUSED: at the motor's HIGH limit", "REFUSED: at the motor's LOW limit", "starting / stopping"};
     String t; t.reserve(1900); char l[200]; uint32_t now = millis();
-    snprintf(l, sizeof l, "X70 head build %d, up %lu s. motors %s, tracking %s, manual hold %ld ms, OBS %s, top %d RPM, slow cap %d RPM\n", FW_BUILD, now / 1000, motorsOn ? "ON" : "OFF", trackingOn ? "allowed" : "blocked", (long)(int32_t)(manualUntil - now), (viscaClient && viscaClient.connected()) ? "connected" : "not connected", (int)maxRpm, (int)SLOW_CAP_RPM); t += l;
+    snprintf(l, sizeof l, "X70 head build %d, up %lu s. motors %s, tracking %s, manual hold %ld ms, OBS %s, top %d RPM, slow cap %d RPM\n", FW_BUILD, now / 1000, motorsOn ? "ON" : "OFF", trackingOn ? "allowed" : "blocked", (long)(int32_t)(manualUntil - now), obsUp ? "connected" : "not connected", (int)maxRpm, (int)SLOW_CAP_RPM); t += l;
     for (int i = 0; i < 2; i++) {
       Axis &x = *AX[i];
       long pos = x.st ? x.st->getCurrentPosition() : 0;
@@ -681,7 +701,7 @@ void webSetup() {
       snprintf(l, sizeof l, "  motor position %ld steps. motor low limit %s %ld, motor high limit %s %ld, cap %.0f steps/s\n  commands: page-or-box stick %.0f, OBS %.0f, preset move %d\n", pos, x.hasLo ? "SET" : "none", x.lo, x.hasHi ? "SET" : "none", x.hi, capSps(x), x.webCmd, x.viscaCmd, (int)x.going); t += l;
     }
     snprintf(l, sizeof l, "sticks: page pan %.0f tilt %.0f (last heard %ld ms ago, %lu packets), box pan %.0f tilt %.0f (last heard %ld ms ago, %lu packets)\n", stickCmd[0][0], stickCmd[0][1], stickMs[0] ? (long)(now - stickMs[0]) : -1L, (unsigned long)stickCount[0], stickCmd[1][0], stickCmd[1][1], stickMs[1] ? (long)(now - stickMs[1]) : -1L, (unsigned long)stickCount[1]); t += l;
-    snprintf(l, sizeof l, "Wi-Fi %d dBm, free memory %d KB, longest pause of the head's own loop %lu ms, page requests %lu\nlast requests (seconds since power-up):\n", (int)WiFi.RSSI(), (int)(ESP.getFreeHeap() / 1024), (unsigned long)loopMaxMs, (unsigned long)httpCount); t += l;
+    snprintf(l, sizeof l, "Wi-Fi %d dBm, free memory %d KB, longest pause: movement task %lu ms, web side %lu ms, page requests %lu\nlast requests (seconds since power-up):\n", (int)WiFi.RSSI(), (int)(ESP.getFreeHeap() / 1024), (unsigned long)ctlMaxMs, (unsigned long)loopMaxMs, (unsigned long)httpCount); t += l;
     for (int i = 0; i < 10; i++) { const char *r = reqLog[(reqHead + i) % 10]; if (r[0]) { t += "  "; t += r; t += '\n'; } }
     web.sendHeader("Cache-Control", "no-store"); web.send(200, "text/plain", t);
   });
@@ -759,8 +779,10 @@ bool joinSavedWifi() {                         // two remembered networks: joins
 }
 
 // ---------------- start-up ----------------
+void controlTask(void *);
 void setup() {
   pinMode(EN_PIN, OUTPUT); digitalWrite(EN_PIN, HIGH);          // motors off until everything is ready
+  motLock = xSemaphoreCreateRecursiveMutex(); evLock = xSemaphoreCreateMutex();
   Serial.begin(115200);
   Serial2.begin(115200, SERIAL_8N1, UART_RX, UART_TX);
   delay(300);
@@ -806,20 +828,35 @@ void setup() {
   viscaTcp.begin();
   viscaUdp.begin(52381);
   joyUdp.begin(52380);
+  xTaskCreatePinnedToCore(controlTask, "control", 8192, NULL, 2, NULL, 1);
+}
+
+// Movement, the joystick box and OBS: every 2 ms, whatever the web side is doing.
+void controlTask(void *) {
+  uint32_t lastTick = millis(), lastPass = millis();
+  for (;;) {
+    uint32_t now = millis();
+    if (now - lastPass > ctlMaxMs) ctlMaxMs = now - lastPass;
+    lastPass = now;
+    {
+      Lock l;
+      if (now - lastTick >= 10) { float dt = (now - lastTick) * 0.001f; if (dt > 0.05f) dt = 0.05f; lastTick = now; motionTick(dt); }
+      viscaPoll();
+      joyBoxPoll();
+    }
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
 }
 
 void loop() {
   if (updMode) { web.handleClient(); delay(2); return; }      // update in progress: only the page is served
-  static uint32_t lastTick = 0, lastPass = 0, lastBusyEv = 0;
+  static uint32_t lastPass = 0, lastBusyEv = 0;
   uint32_t now = millis();
-  if (lastPass != 0 && now - lastPass > 250 && (lastBusyEv == 0 || now - lastBusyEv > 5000)) { lastBusyEv = now; ev("head was busy for %u ms (nothing heard meanwhile)", (unsigned)(now - lastPass)); }
+  if (lastPass != 0 && now - lastPass > 250 && (lastBusyEv == 0 || now - lastBusyEv > 5000)) { lastBusyEv = now; ev("web side was held up for %u ms (motors unaffected)", (unsigned)(now - lastPass)); }
   if (lastPass != 0 && now - lastPass > loopMaxMs) loopMaxMs = now - lastPass;
   lastPass = now;
-  if (now - lastTick >= 10) { float dt = (now - lastTick) * 0.001f; if (dt > 0.05f) dt = 0.05f; lastTick = now; motionTick(dt); }
   web.handleClient();
   ArduinoOTA.handle();
-  viscaPoll();
-  joyBoxPoll();
   // Automatic updates: look at GitHub every 10 minutes, but only while nothing is happening
   // (no joystick or OBS command and no movement for 5 minutes, or the first minutes after power-up).
   static uint32_t lastCheck = 0, lastJoyNudge = 0;

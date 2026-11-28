@@ -91,6 +91,7 @@ nav a svg{display:block;margin:0 auto 2px;width:22px;height:22px;fill:none;strok
 .sh h2{margin:0 0 6px;font-size:18px}.sh p{margin:0 0 12px;color:var(--dm);font-size:14px}.sh .st{display:flex;flex-direction:column;gap:8px;margin-top:12px}
 @keyframes up{from{transform:translateY(24px);opacity:0}}@keyframes sp{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+#shv{z-index:12}#up{z-index:14}
 #wz{background:var(--bg);align-items:stretch;overflow:auto}.wzi{width:100%;max-width:480px;margin:auto;padding:14px 16px calc(18px + env(safe-area-inset-bottom));display:flex;flex-direction:column;min-height:100%}
 .wzh{display:flex;align-items:center;gap:12px}.wzh button{padding:8px 12px;border-radius:99px;font-size:13px}.wzp{flex:1;height:4px;border-radius:2px;background:var(--ln);overflow:hidden}.wzp b{display:block;height:100%;background:var(--ac);transition:width .3s}
 #wzb{flex:1;display:flex;flex-direction:column}#wzb h2{font-size:22px;margin:18px 0 6px;letter-spacing:-.01em;text-wrap:balance}#wzb p{color:#c3cad4;margin:0 0 8px;font-size:15px}
@@ -307,8 +308,8 @@ $('wzx').onclick=function(){AU=0;X=Y=0;W=null;$('wz').hidden=true};$('wzk').oncl
 function wzSet(h,f){$('wzb').innerHTML=h+'<div class="wzf">'+f+'</div>';var p=$('wzb').querySelector('.pad');if(p)padOn(p);$('wzbar').style.width=(W.i/6*100)+'%';$('wzk').style.visibility=W.i||W.s?'visible':'hidden';$('wz').scrollTop=0;wzLive()}
 var PAD='<div class="pad"><div class="kn"></div></div><div class="tr"></div>',NX='<button class="pr" onclick="wzGo(1)">',SK='<button class="gh" onclick="wzGo(1)">Skip for now</button>';
 function wzDraw(){var k=WZ[W.i],s=S;
-if(k=='dir'){var up=W.s==1;wzSet('<span class="lb">Step 1 of 6 · Directions</span><h2>Push the stick '+(up?'UP':'to the RIGHT')+' and watch the camera.</h2><p>Did the camera '+(up?'tilt up':'turn to its right, as seen from behind it')+'?</p>'+PAD,
-'<button class="pr" onclick="wzDir(0)">Yes, it went '+(up?'up':'right')+'</button><button onclick="wzDir(1)">No, it went '+(up?'down':'left')+': fix it</button>')}
+if(k=='dir'){var up=W.s%2==1,box=W.s>1;wzSet('<span class="lb">Step 1 of 6 · Directions · '+(box?'joystick box':'this screen')+'</span><h2>Push the '+(box?'JOYSTICK BOX stick':'stick on this screen')+' '+(up?'UP':'to the RIGHT')+' and watch the camera.</h2><p>Did the camera '+(up?'tilt up':'turn to its right, as seen from behind it')+'?</p>'+(box?'<div class="tip">The screen and the box each remember their own directions. This makes the box agree with the screen.</div><div class="tr"></div>':PAD),
+'<button class="pr" onclick="wzDir(0)">Yes, it went '+(up?'up':'right')+'</button><button onclick="wzDir(1)">No, it went '+(up?'down':'left')+': fix it</button>'+(box?'<button class="gh" onclick="q(\'/set?sd=\'+(S.sd|1)).then(function(){wzGo(1)})">Skip the joystick box</button>':''))}
 if(k=='ctr')wzSet('<span class="lb">Step 2 of 6 · Centre</span><h2>Aim at the middle of the stage, level.</h2><p>This becomes “straight ahead”. Angles are counted from here, and presets you already saved keep their real places.</p>'+PAD+'<div class="rd" id="dR0"></div>',
 '<button class="pr" onclick="q(\'/zero\').then(function(){return q(\'/set?sd=\'+(S.sd|2))}).then(function(){wzGo(1)})">This is centre</button>'+SK);
 if(k=='pan'||k=='tilt'){var a=k=='pan'?0:1,n=a?['DOWN','UP','d','u','down','up']:['LEFT','RIGHT','l','r','left','right'],h0=s.lm[a*2],h1=s.lm[a*2+1],e=W.s;
@@ -336,7 +337,8 @@ wzSet('<span class="lb">Step 6 of 6 · Movement feel</span><h2>How should the ca
 if(k=='done'){var st=steps(s),n=st.filter(function(x){return x[2]}).length,l='';st.forEach(function(x){l+='<div class="hl '+(x[2]?'':'wn')+'"><span>'+x[0]+'<small>'+esc(x[1])+'</small></span></div>'});
 wzSet('<h2>'+(n==6?'The head is ready.':'Saved. '+(6-n)+' step'+(n==5?'':'s')+' still open.')+'</h2><p>'+(n==6?'It knows its directions, its centre, how far it may travel and how fast to move. Save a few presets next: aim, then tap an empty preset.':'You can finish the open ones any time from the Setup tab.')+'</p><div class="c" style="margin-top:8px">'+l+'</div>','<button class="pr" onclick="$(\'wzx\').onclick();go(\'control\')">Go to the controls</button>')}}
 function wzRe(a){q('/lim?a='+(a?'t':'p')+'&e=c').then(function(){W.s=0;W.re=1;wzDraw()})}
-function wzDir(flip){var up=W.s==1,d=function(){if(up)q('/set?sd='+(S.sd|1)).then(function(){wzGo(1)});else{W.s=1;wzDraw()}};if(flip)q('/set?inv'+(up?'t':'p')+'=1').then(function(){ask('Fixed. Try it again.','Push the stick '+(up?'up':'right')+' once more to check.','OK',function(){})});else d()}
+function wzDir(flip){var up=W.s%2==1,box=W.s>1;if(flip){q(box?'/boxflip?a='+(up?'u':'l'):'/set?inv'+(up?'t':'p')+'=1').then(function(){ask('Fixed. Try it again.','Push the '+(box?'joystick box ':'')+'stick '+(up?'up':'right')+' once more to check.','OK',function(){})});return}
+if(W.s<(S.jon?3:1)){W.s++;wzDraw()}else q('/set?sd='+(S.sd|1)).then(function(){wzGo(1)})}
 var AU=0,AUt=0,AUp=0;
 // the head turns the camera by itself for the gear measurement: a steady slow turn, and short nudges to land on the mark
 function wzAuto(){var m=W.m;if(AU){AU=0;X=Y=0}else{AU=1;AUt=Date.now();AUp=m.a?S.tt:S.pt;if(m.a)Y=.6;else X=.6}var b=$('gA');if(b){b.textContent=AU?'Stop':'Start turning again';b.className=(AU?'dg':'pr')+' bw'}}
