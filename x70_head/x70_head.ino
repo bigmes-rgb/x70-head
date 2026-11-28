@@ -19,6 +19,9 @@
 #define FW_BUILD 0          // stamped by the automatic build - leave as it is
 const char *FW_BASE = "https://github.com/bigmes-rgb/x70-head/releases/latest/download/";
 const char *FW_FILE = "x70_head.bin";
+// Same files on the installer site. Tried first: it is one secure connection to one server, where the release link
+// above is passed through two more servers and needs about twice the memory.
+const char *FW_SITE = "https://bigmes-rgb.github.io/x70-head/";
 const char *AP_NAME = "X70-Head";
 const char *DEFAULT_PASS = "x70head123";   // device password until you change it on the Wi-Fi page
 
@@ -374,13 +377,14 @@ volatile int chkState = 0;                     // 0 idle, 1 asking GitHub, 2 ans
 int chkBuild = -1; char chkErr[120] = ""; bool chkAuto = false;
 void checkTask(void *) {
   chkErr[0] = 0; chkBuild = -1;
-  {
+  for (int source = 0; source < 2 && chkBuild < 0; source++) {
     WiFiClientSecure c; c.setInsecure();
     HTTPClient h; h.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); h.setConnectTimeout(8000); h.setTimeout(8000);
-    if (h.begin(c, String(FW_BASE) + "version.txt")) {
+    String url = source == 0 ? String(FW_SITE) + "version.txt?t=" + String(esp_random()) : String(FW_BASE) + "version.txt";
+    if (h.begin(c, url)) {
       int code = h.GET();
-      if (code == 200) chkBuild = h.getString().toInt();
-      else { char tls[60] = ""; c.lastError(tls, sizeof tls); snprintf(chkErr, sizeof chkErr, "Could not reach GitHub (%s%s%s)", HTTPClient::errorToString(code).c_str(), tls[0] ? " / " : "", tls); }
+      if (code == 200) { int b = h.getString().toInt(); if (b > 0) { chkBuild = b; chkErr[0] = 0; } }
+      if (chkBuild < 0) { char tls[60] = ""; c.lastError(tls, sizeof tls); snprintf(chkErr, sizeof chkErr, "Could not reach GitHub (%s%s%s)", code > 0 ? String(code).c_str() : HTTPClient::errorToString(code).c_str(), tls[0] ? " / " : "", tls); }
       h.end();
     } else snprintf(chkErr, sizeof chkErr, "Could not reach GitHub");
   }
@@ -416,7 +420,8 @@ void updateTask(void *) {
   for (int attempt = 1; attempt <= 5; attempt++) {
     updTry = attempt; updStage = 1; updPct = 0;
     WiFiClientSecure c; c.setInsecure();
-    t_httpUpdate_return r = httpUpdate.update(c, String(FW_BASE) + FW_FILE);
+    String url = (attempt % 2) ? String(FW_SITE) + FW_FILE + "?t=" + String(esp_random()) : String(FW_BASE) + FW_FILE;   // installer site first, release link as the fallback
+    t_httpUpdate_return r = httpUpdate.update(c, url);
     if (r == HTTP_UPDATE_OK) { updPct = 100; updStage = 3; delay(2500); ESP.restart(); }
     char tls[80] = ""; int te = c.lastError(tls, sizeof tls);       // the exact reason the secure connection gave, for diagnosis
     err = httpUpdate.getLastErrorString(); if (te) { err += " / "; err += tls; }

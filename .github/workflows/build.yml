@@ -51,6 +51,7 @@ jobs:
           cp out/head/x70_head.ino.bootloader.bin site/head_bootloader.bin
           cp out/head/x70_head.ino.partitions.bin site/head_partitions.bin
           cp out/head/x70_head.ino.bin site/x70_head.bin
+          echo "${{ github.run_number }}" > site/version.txt
           cp out/joy/x70_joystick.ino.bootloader.bin site/joy_bootloader.bin
           cp out/joy/x70_joystick.ino.partitions.bin site/joy_partitions.bin
           cp out/joy/x70_joystick.ino.bin site/x70_joystick.bin
