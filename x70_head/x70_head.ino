@@ -804,7 +804,7 @@ void webSetup() {
   });
   web.on("/wifi", []() {
     String h = F("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><body style='font:16px sans-serif;max-width:420px;margin:auto;padding:16px'>"
-                 "<h3>X70 head: Wi-Fi</h3><form method=post action=/wifisave>Wi-Fi name<br><input name=s style='width:100%;font-size:16px' value='");
+                 "<h3>X70 head: Wi-Fi</h3><p style='font-size:14px;color:#555'>Saving here also updates the joystick box, as long as it is switched on.</p><form method=post action=/wifisave>Wi-Fi name<br><input name=s style='width:100%;font-size:16px' value='");
     h += wifiSsid;
     h += F("'><br><br>Wi-Fi password (leave empty to keep)<br><input name=p type=password style='width:100%;font-size:16px'><br><br><b>Second network (optional)</b>, for example the church if the first is home. It joins whichever is in range.<br>Wi-Fi name 2<br><input name=s2 style='width:100%;font-size:16px' value='");
     h += wifiSsid2;
@@ -820,7 +820,16 @@ void webSetup() {
     if (s.length()) { prefs.putString("ssid", s); if (p.length() || s != wifiSsid) prefs.putString("wpass", p); }
     if (web.hasArg("s2")) { prefs.putString("ssid2", s2); if (p2.length() || s2 != wifiSsid2) prefs.putString("wpass2", p2); }   // empty name = forget network 2
     if (d.length() >= 8) prefs.putString("dpass", d);
-    web.send(200, "text/html", waitPage("Saved. The head is restarting", "Still not back? If you moved it to a different Wi-Fi, put this phone or PC on that Wi-Fi and open x70head.local. If the name or password was wrong, join the Wi-Fi called X70-Head and open 192.168.4.1/wifi to correct it.", "/s", 45));
+    // Give the joystick box the same Wi-Fi details and device password, so it only has to be done here.
+    // Sent straight to the box (never broadcast), over the Wi-Fi both are on now.
+    bool joyHere = joyIP[0] != 0 && joySeenMs != 0 && millis() - joySeenMs < 6000;
+    if (joyHere) {
+      String m = "W\t" + prefs.getString("ssid", "") + "\t" + prefs.getString("wpass", "") + "\t" + prefs.getString("ssid2", "") + "\t" + prefs.getString("wpass2", "") + "\t" + prefs.getString("dpass", DEFAULT_PASS);
+      for (int i = 0; i < 3; i++) { sendText(joyIP, m.c_str(), 52379); delay(60); }
+    }
+    String note = "Still not back? If you moved it to a different Wi-Fi, put this phone or PC on that Wi-Fi and open x70head.local. If the name or password was wrong, join the Wi-Fi called X70-Head and open 192.168.4.1/wifi to correct it.";
+    String head = joyHere ? "Saved on the head and the joystick box. Both are restarting" : "Saved on the head only (joystick box not switched on). Restarting";
+    web.send(200, "text/html", waitPage(head.c_str(), note.c_str(), "/s", 45));
     delay(800); setMotors(false); ESP.restart();
   });
   webUpdater.setup(&web, "/update", "admin", devPass.c_str());   // upload a .bin from any browser

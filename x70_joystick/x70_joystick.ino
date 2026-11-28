@@ -54,6 +54,7 @@ WiFiUDP udp;
 WiFiUDP cmdUdp;                          // the head tells the box to update on port 52379
 String wifiSsid, wifiPass, wifiSsid2, wifiPass2, devPass;      // stored in the box (its own page)
 bool apMode = false, updateRequested = false;
+uint32_t wifiRestartAt = 0;
 bool swapAxes = true, flipLR = false, flipUD = false;   // stick direction settings (box page)
 bool trkInvert = false;                                 // false: CW/CCW button pressed in = face tracking allowed
 bool trkWanted = true; uint32_t trkEdgeMs = 0;
@@ -191,7 +192,7 @@ void setup() {
     h += apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
     h += F("<br>Head: ");
     if (headKnown()) { h += F("<a href='http://"); h += headIP.toString(); h += F("/'>"); h += headIP.toString(); h += F("</a>"); } else h += F("not found yet");
-    h += F("</p><form method=post action=/wifisave>Wi-Fi name (same as the head)<br><input name=s style='width:100%;font-size:16px' value='");
+    h += F("</p><form method=post action=/wifisave><i>Easier: set the Wi-Fi on the head's page; it passes it on to this box.</i><br><br>Wi-Fi name (same as the head)<br><input name=s style='width:100%;font-size:16px' value='");
     h += wifiSsid;
     h += F("'><br><br>Wi-Fi password (leave empty to keep)<br><input name=p type=password style='width:100%;font-size:16px'><br><br><b>Second network (optional)</b>, for example the church if the first is home. It joins whichever is in range.<br>Wi-Fi name 2<br><input name=s2 style='width:100%;font-size:16px' value='");
     h += wifiSsid2;
@@ -244,8 +245,16 @@ void loop() {
   if (!apMode && !wifi && now - lastTry > 8000) { lastTry = now; WiFi.reconnect(); }
   if (wifi && now - lastBeat > 2000) { lastBeat = now; char m[24]; snprintf(m, sizeof m, "H,%d,%d", FW_BUILD, trkWanted ? 1 : 0); sendToHead(m); }   // "I'm here, build N, tracking switch"
   if (cmdUdp.parsePacket() > 0) {
-    char b[16]; int n = cmdUdp.read((uint8_t *)b, sizeof b - 1); b[n > 0 ? n : 0] = 0;
-    if (b[0] == 'U') updateRequested = true;
+    char b[360]; int n = cmdUdp.read((uint8_t *)b, sizeof b - 1); b[n > 0 ? n : 0] = 0;
+    if (b[0] == 'U' && b[1] == 0) updateRequested = true;
+    else if (b[0] == 'W' && b[1] == '\t' && wifiRestartAt == 0) {             // the head passes on its Wi-Fi details and device password
+      String f[5]; int k = 0; for (char *q = b + 2; *q && k < 5; q++) { if (*q == '\t') k++; else f[k] += *q; }
+      if (k == 4 && f[0].length()) {
+        prefs.putString("ssid", f[0]); prefs.putString("wpass", f[1]); prefs.putString("ssid2", f[2]); prefs.putString("wpass2", f[3]);
+        if (f[4].length() >= 8) prefs.putString("dpass", f[4]);
+        wifiRestartAt = now + 1500;
+      }
+    }
     else if (b[0] == 'A') { headIP = cmdUdp.remoteIP(); headAckMs = now; headBuild = atoi(b + 2); }   // the head answered a heartbeat
   }
   // head not answering: look it up by its name (x70head.local). Only while the stick is at rest, it takes a moment.
@@ -254,6 +263,7 @@ void loop() {
     IPAddress ip = MDNS.queryHost("x70head", 1500);
     if (ip[0] != 0) { headIP = ip; Serial.printf("Found the head by name at %s\n", ip.toString().c_str()); }
   }
+  if (wifiRestartAt != 0 && (int32_t)(now - wifiRestartAt) >= 0) ESP.restart();
   if (updateRequested && wifi) { updateRequested = false; selfUpdate(); }
 
   if (now - lastSend >= 50) {                                     // 20 times a second
