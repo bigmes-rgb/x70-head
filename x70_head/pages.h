@@ -167,12 +167,12 @@ nav a svg{display:block;margin:0 auto 2px;width:22px;height:22px;fill:none;strok
 <a href="#system" data-t="system"><svg viewBox="0 0 24 24"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg><span>System<em id="nh" hidden></em></span></a></nav></div></div>
 
 <script>
-var X=0,Y=0,act=false,busy=false,S={},last=0,idle=0,U=null,W=null,NS='http://www.w3.org/2000/svg';
+var X=0,Y=0,act=false,busy=false,hold=0,S={},last=0,idle=0,U=null,W=null,NS='http://www.w3.org/2000/svg';
 function $(i){return document.getElementById(i)}
 function esc(t){return String(t).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
 function fx(v,d){return (v<0?'−':'')+Math.abs(v).toFixed(d)}
 // ---- talking to the head
-function q(u){var c=new AbortController(),t=setTimeout(function(){c.abort()},2500);return fetch(u,{signal:c.signal}).then(function(r){return r.json()}).then(show).catch(function(){offline()}).then(function(){clearTimeout(t)})}
+var QN=Promise.resolve();function q(u){QN=QN.then(function(){var c=new AbortController(),t=setTimeout(function(){c.abort()},3000);hold++;return fetch(u,{signal:c.signal}).then(function(r){return r.json()}).then(show).catch(function(){offline()}).then(function(){clearTimeout(t);hold--})});return QN}
 function offline(){$('hero').textContent='No connection to the head';$('hero').className='b';$('sub').textContent='Trying again…';if(U)upDraw(null)}
 // ---- joystick pads (the main one and the one inside the guided setup share the stick)
 function padOn(p){var k=p.firstElementChild;function mv(e){var r=p.getBoundingClientRect(),x=(e.clientX-r.left)/r.width*2-1,y=1-(e.clientY-r.top)/r.height*2,m=Math.hypot(x,y);if(m>1){x/=m;y/=m}X=x;Y=y;k.style.left=(33+X*33)+'%';k.style.top=(33-Y*33)+'%'}
@@ -285,8 +285,8 @@ $('dN').setAttribute('transform','rotate('+(k?-a:a).toFixed(1)+' 100 100)');var 
 $('dA').setAttribute('d',t-f>.5?arc(k,f,t,82):'');$('dA').setAttribute('stroke',hl&&hh?'#4cd08a':'#ffb347');var g='';[[hl,lo],[hh,hi]].forEach(function(e){if(e[0]){var p=pt(k,e[1],82);g+='<circle cx="'+p[0].toFixed(1)+'" cy="'+p[1].toFixed(1)+'" r="6" fill="#4cd08a" stroke="#0d0f13" stroke-width="2"/>'}});$('dL').innerHTML=g;
 if($('dR'))$('dR').innerHTML='<span>now <b class="n">'+pos(k,v)+'</b></span>'+(hl&&hh?'<span>travel <b class="n">'+pos(k,lv[k*2+1]-lv[k*2]).replace('−','')+'</b></span>':'')}
 function wzOpen(i){W={i:i||0,s:0};$('wz').hidden=false;wzDraw()}
-function wzGo(d){W.i=Math.max(0,Math.min(6,W.i+d));W.s=0;W.m=null;wzDraw()}
-$('wzx').onclick=function(){X=Y=0;W=null;$('wz').hidden=true};$('wzk').onclick=function(){if(W.s>0){W.s--;wzDraw()}else wzGo(-1)};
+function wzGo(d){AU=0;X=Y=0;W.i=Math.max(0,Math.min(6,W.i+d));W.s=0;W.m=null;wzDraw()}
+$('wzx').onclick=function(){AU=0;X=Y=0;W=null;$('wz').hidden=true};$('wzk').onclick=function(){AU=0;X=Y=0;if(W.s>0){W.s--;wzDraw()}else wzGo(-1)};
 function wzSet(h,f){$('wzb').innerHTML=h+'<div class="wzf">'+f+'</div>';var p=$('wzb').querySelector('.pad');if(p)padOn(p);$('wzbar').style.width=(W.i/6*100)+'%';$('wzk').style.visibility=W.i||W.s?'visible':'hidden';$('wz').scrollTop=0;wzLive()}
 var PAD='<div class="pad"><div class="kn"></div></div>',NX='<button class="pr" onclick="wzGo(1)">',SK='<button class="gh" onclick="wzGo(1)">Skip for now</button>';
 function wzDraw(){var k=WZ[W.i],s=S;
@@ -297,31 +297,37 @@ if(k=='ctr')wzSet('<span class="lb">Step 2 of 6 · Centre</span><h2>Aim at the m
 if(k=='pan'||k=='tilt'){var a=k=='pan'?0:1,n=a?['DOWN','UP','d','u','down','up']:['LEFT','RIGHT','l','r','left','right'],h0=s.lm[a*2],h1=s.lm[a*2+1],e=W.s;
 if(e==0&&h0&&h1&&!W.re){wzSet('<span class="lb">Step '+(4+a)+' of 6 · '+(a?'Up and down':'Left and right')+' limits</span><h2>These limits are set.</h2><p>The head slows down by itself as it gets near them and never drives past.</p><div class="fig">'+dial(a)+'</div><div class="rd" id="dR"></div>',
 NX+'Keep them</button><button onclick="q(\'/lim?a='+(a?'t':'p')+'&e=c\').then(function(){W.re=1;wzDraw()})">Set them again</button>');return}
-if(e>1){W.re=0;wzSet('<span class="lb">Step '+(4+a)+' of 6</span><h2>'+(a?'Tilt':'Pan')+' limits saved.</h2><p>Try it: push the stick all the way each side. The head eases to a stop at each end.</p><div class="fig">'+dial(a)+'</div><div class="rd" id="dR"></div>'+PAD,NX+'Next</button>');return}
+if(e>1){W.re=0;wzSet('<span class="lb">Step '+(4+a)+' of 6</span><h2>'+(a?'Tilt':'Pan')+' limits saved.</h2><p>Try it: push the stick all the way each side. The head eases to a stop at each end.</p><div class="fig">'+dial(a)+'</div><div class="rd" id="dR"></div>'+PAD,NX+'Next</button><button class="gh" onclick="wzRe('+a+')">Not right? Clear and set them again</button>');return}
 wzSet('<span class="lb">Step '+(4+a)+' of 6 · '+(a?'Up and down':'Left and right')+' limits</span><h2>Drive '+n[e]+' to the furthest safe point.</h2><p>Go slowly. Stop before a cable pulls tight or the camera touches anything'+(a?'.':', then leave a finger of slack.')+'</p><div class="fig">'+dial(a)+'</div><div class="rd" id="dR"></div>'+PAD,
-'<button class="pr" onclick="q(\'/lim?a='+(a?'t':'p')+'&e='+n[e+2]+'\').then(function(){W.s++;wzDraw()})">Set the '+n[e+4]+' limit here</button>'+(e==0?SK:''))}
+'<button class="pr" onclick="q(\'/lim?a='+(a?'t':'p')+'&e='+n[e+2]+'\').then(function(){W.s++;wzDraw()})">Set the '+n[e+4]+' limit here</button>'+(e==0?SK:'<button class="gh" onclick="wzRe('+a+')">Wrong spot? Clear and start this step over</button>'))}
 if(k=='gear'){var m=W.m;if(!m){wzSet('<span class="lb">Step 3 of 6 · Gears</span><h2>How far does the camera turn for each motor turn?</h2><p>With this the head knows real angles, so speeds read in degrees per second and tracking is calibrated.</p>'+
-'<button class="opt" onclick="W.m={a:0,g:90};wzDraw()"><b>Measure it for me</b><small>Turn the camera through a known angle. The head counts the motor turns and does the maths. About a minute per axis.</small></button>'+
+'<button class="opt" onclick="W.m={a:0,g:90};wzDraw()"><b>Measure it for me</b><small>The head turns the camera slowly by itself. You tap Stop when it has turned a quarter turn, and the head does the maths. About a minute per axis.</small></button>'+
 '<button class="opt" onclick="W.m={k:1};wzDraw()"><b>I know the numbers</b><small>Type the motor turns per camera turn for pan and tilt.</small></button>'+(s.gp>0&&s.gt>0?'<div class="tip">Saved now: pan <b class="n">'+s.gp.toFixed(2)+'</b>, tilt <b class="n">'+s.gt.toFixed(2)+'</b></div>':''),(s.gp>0&&s.gt>0?NX+'Keep these</button>':SK));return}
 if(m.k){wzSet('<span class="lb">Step 3 of 6 · Gears</span><h2>Motor turns for one full camera turn</h2><p>Pan, then tilt.</p><div class="row"><input id="wgp" type="number" step="0.01" inputmode="decimal" value="'+(s.gp||'')+'" placeholder="Pan"><input id="wgt" type="number" step="0.01" inputmode="decimal" value="'+(s.gt||'')+'" placeholder="Tilt"></div>',
 '<button class="pr" onclick="q(\'/set?gp=\'+($(\'wgp\').value||0)+\'&gt=\'+($(\'wgt\').value||0)).then(function(){wzGo(1)})">Save</button><button class="gh" onclick="W.m=null;wzDraw()">Measure instead</button>');return}
 var ax=m.a,nm=ax?'tilt':'pan',ch=ax?[20,30,45]:[45,90,180],cs='';ch.forEach(function(c){cs+='<button class="'+(m.g==c?'on':'')+'" onclick="W.m.g='+c+';wzDraw()">'+c+'°</button>'});
 if(m.r!=null){wzSet('<span class="lb">Step 3 of 6 · Gears · '+nm+'</span><h2 class="n">'+m.r.toFixed(2)+'</h2><p>motor turns for one full camera '+(ax?'tilt circle':'turn')+'. '+(m.r<2||m.r>400?'That looks unlikely. Measure again, moving exactly '+m.g+'°.':'Measured from '+Math.abs(m.d).toFixed(2)+' motor turns over '+m.g+'°.')+'</p>',
 '<button class="pr" onclick="wzGearSave()">Save and '+(ax?'finish':'measure tilt')+'</button><button onclick="W.m={a:'+ax+',g:'+m.g+'};wzDraw()">Measure again</button>');return}
-if(m.p0==null)wzSet('<span class="lb">Step 3 of 6 · Gears · '+nm+'</span><h2>Aim the camera at a starting mark.</h2><p>'+(ax?'Level is easiest: a phone’s level app laid on top of the camera shows 0°.':'Pick something easy to line up with, like the edge of a door, and centre it in the viewfinder.')+'</p><p>Then choose how far you will turn it:</p><div class="ch3">'+cs+'</div>'+PAD,
-'<button class="pr" onclick="W.m.p0='+(ax?'S.tt':'S.pt')+';wzDraw()">Start measuring</button><button class="gh" onclick="'+(ax?'wzGo(1)':'W.m={a:1,g:30};wzDraw()')+'">Skip '+nm+'</button>');
-else wzSet('<span class="lb">Step 3 of 6 · Gears · '+nm+'</span><h2>Now '+(ax?'tilt':'turn')+' the camera exactly '+m.g+'°.</h2><p>'+(ax?'Watch the phone’s level app on top of the camera until it reads '+m.g+'°.':m.g==90?'A quarter turn: from facing the stage to facing the side wall squarely.':m.g==180?'Half a turn: until it faces exactly backwards.':'Half of a quarter turn: from square-on to the corner of a square room.')+'</p>'+PAD+'<div class="rd"><span>motor turns so far <b class="n" id="gN">0.00</b></span></div>',
-'<button class="pr" onclick="wzGearDone()">Done, it has turned '+m.g+'°</button><button class="gh" onclick="W.m.p0=null;wzDraw()">Start over</button>')}
+if(m.p0==null)wzSet('<span class="lb">Step 3 of 6 · Gears · '+nm+'</span><h2>Aim the camera at a starting mark.</h2><p>'+(ax?'Level is easiest: a phone’s level app laid on top of the camera shows 0°.':'Pick something easy to line up with, like the edge of a door, and centre it in the viewfinder.')+'</p><p>Use the stick here to line it up. Then choose how far the head should turn it:</p><div class="ch3">'+cs+'</div>'+PAD,
+'<button class="pr" onclick="W.m.p0='+(ax?'S.tt':'S.pt')+';wzDraw()">It is on the mark: next</button><button class="gh" onclick="'+(ax?'wzGo(1)':'W.m={a:1,g:30};wzDraw()')+'">Skip '+nm+'</button>');
+else wzSet('<span class="lb">Step 3 of 6 · Gears · '+nm+'</span><h2>Let the head '+(ax?'tilt':'turn')+' the camera exactly '+m.g+'°.</h2><p>Tap Start. The camera '+(ax?'tilts up':'turns right')+' slowly by itself. Tap Stop when it has '+(ax?'tilted':'turned')+' '+m.g+'°: '+(ax?'the phone’s level app on top of the camera reads '+m.g+'°.':m.g==90?'a quarter turn, from facing the stage to squarely facing the side wall.':m.g==180?'half a turn, facing exactly backwards.':'half of a quarter turn.')+'</p>'+
+'<button id="gA" class="pr bw" style="padding:22px;font-size:18px;margin-top:10px" onclick="wzAuto()">Start turning</button><div class="row" style="margin-top:8px"><button onclick="wzNudge(-1)">◂ back a little</button><button onclick="wzNudge(1)">a little more ▸</button></div><div class="rd" style="margin-top:14px"><span>motor turns so far <b class="n" id="gN">0.00</b></span></div><div class="tip" id="gT" hidden>The motor is not moving. If the head is at a travel limit, tap Start over, aim the other way and measure from there.</div>',
+'<button class="pr" onclick="wzGearDone()">Done, it has '+(ax?'tilted':'turned')+' '+m.g+'°</button><button class="gh" onclick="AU=0;X=Y=0;W.m.p0=null;wzDraw()">Start over</button>')}
 if(k=='feel'){var o='',cur=feelNow();if(!(s.gp>0)){wzSet('<span class="lb">Step 6 of 6 · Movement feel</span><h2>The gears are needed for this step.</h2><p>Without them the head cannot work out speeds in degrees per second. You can still set speeds by hand on the Setup tab.</p>','<button class="pr" onclick="W.i=2;W.s=0;W.m=null;wzDraw()">Go to gears</button>'+SK);return}
 FEEL.forEach(function(f,i){var v=feel(i);o+='<button class="opt'+(i==cur?' on':'')+'" onclick="feelSet('+i+');setTimeout(wzDraw,400)"><b>'+f[0]+(i==1?' · recommended':'')+'</b><small>'+['Slow, graceful moves for a seated sermon and a tight shot.','A natural pace for most services.','Quick moves for an active stage and a wide shot.'][i]+' Joystick up to '+(v.max*6/s.gp*v.jsc).toFixed(0)+'°/s, top speed '+(v.max*6/s.gp).toFixed(0)+'°/s.</small></button>'});
 wzSet('<span class="lb">Step 6 of 6 · Movement feel</span><h2>How should the camera move?</h2><p>Worked out for your gears. Pick one and try it on the stick; change it any time.</p>'+o+PAD,NX+(cur<0?'Keep my own numbers':'Finish')+'</button>')}
 if(k=='done'){var st=steps(s),n=st.filter(function(x){return x[2]}).length,l='';st.forEach(function(x){l+='<div class="hl '+(x[2]?'':'wn')+'"><span>'+x[0]+'<small>'+esc(x[1])+'</small></span></div>'});
 wzSet('<h2>'+(n==6?'The head is ready.':'Saved. '+(6-n)+' step'+(n==5?'':'s')+' still open.')+'</h2><p>'+(n==6?'It knows its directions, its centre, how far it may travel and how fast to move. Save a few presets next: aim, then tap an empty preset.':'You can finish the open ones any time from the Setup tab.')+'</p><div class="c" style="margin-top:8px">'+l+'</div>','<button class="pr" onclick="$(\'wzx\').onclick();go(\'control\')">Go to the controls</button>')}}
+function wzRe(a){q('/lim?a='+(a?'t':'p')+'&e=c').then(function(){W.s=0;W.re=1;wzDraw()})}
 function wzDir(flip){var up=W.s==1,d=function(){if(up)q('/set?sd='+(S.sd|1)).then(function(){wzGo(1)});else{W.s=1;wzDraw()}};if(flip)q('/set?inv'+(up?'t':'p')+'=1').then(function(){ask('Fixed. Try it again.','Push the stick '+(up?'up':'right')+' once more to check.','OK',function(){})});else d()}
-function wzGearDone(){var m=W.m,d=(m.a?S.tt:S.pt)-m.p0;if(Math.abs(d)<.15){ask('The motor has hardly moved','Use the stick on this screen to turn the camera '+m.g+'° from the starting mark, then tap Done.','OK',function(){});return}m.d=d;m.r=Math.abs(d)*360/m.g;wzDraw()}
+var AU=0,AUt=0,AUp=0;
+// the head turns the camera by itself for the gear measurement: a steady slow turn, and short nudges to land on the mark
+function wzAuto(){var m=W.m;if(AU){AU=0;X=Y=0}else{AU=1;AUt=Date.now();AUp=m.a?S.tt:S.pt;if(m.a)Y=.6;else X=.6}var b=$('gA');if(b){b.textContent=AU?'Stop':'Start turning again';b.className=(AU?'dg':'pr')+' bw'}}
+function wzNudge(d){if(AU)wzAuto();var m=W.m;if(m.a)Y=d*.35;else X=d*.35;setTimeout(function(){if(!AU)X=Y=0},300)}
+function wzGearDone(){AU=0;X=Y=0;var m=W.m,d=(m.a?S.tt:S.pt)-m.p0;if(Math.abs(d)<.15){ask('The motor has hardly moved','Tap Start turning and let the camera turn '+m.g+'° from the starting mark, then tap Done.','OK',function(){});return}m.d=d;m.r=Math.abs(d)*360/m.g;wzDraw()}
 function wzGearSave(){var m=W.m;q('/set?'+(m.a?'gt':'gp')+'='+m.r.toFixed(2)).then(function(){if(m.a)wzGo(1);else{W.m={a:1,g:30};wzDraw()}})}
 function wzLive(){if(!W||!S.lm)return;var k=WZ[W.i];if(k=='pan')dialDraw(0);if(k=='tilt')dialDraw(1);if(k=='ctr'&&$('dR0'))$('dR0').innerHTML='<span>pan <b class="n">'+pos(0,S.pt)+'</b></span><span>tilt <b class="n">'+pos(1,S.tt)+'</b></span>';
-if(k=='gear'&&$('gN')&&W.m&&W.m.p0!=null)$('gN').textContent=Math.abs((W.m.a?S.tt:S.pt)-W.m.p0).toFixed(2)}
+if(k=='gear'&&$('gN')&&W.m&&W.m.p0!=null){var c=W.m.a?S.tt:S.pt;$('gN').textContent=Math.abs(c-W.m.p0).toFixed(2);if(AU&&Date.now()-AUt>2500){if(Math.abs(c-AUp)<.01){wzAuto();$('gT').hidden=false}AUt=Date.now();AUp=c}}}
 // ---- live update progress
 try{U=JSON.parse(sessionStorage.x70up||'null')}catch(e){}if(U&&Date.now()-U.t0>600000)U=null;
 function upGo(){var f=function(){U={from:S.fw||0,target:S.lat||0,jon:!!S.jon,t0:Date.now(),step:1,end:''};upDraw(S);q('/fwgo')};
@@ -343,11 +349,11 @@ $('ux').onclick=function(){U=null;$('up').hidden=true;try{sessionStorage.removeI
 function evLoad(){fetch('/log').then(function(r){return r.text()}).then(function(t){$('evt').textContent=t}).catch(function(){$('evt').textContent='could not load'})}
 function evSel(){var r=document.createRange();r.selectNodeContents($('evt'));var s=getSelection();s.removeAllRanges();s.addRange(r)}
 $('evd').ontoggle=function(){if(this.open)evLoad()};
-$('stop').onclick=function(){X=Y=0;q('/stop')};$('trk').onclick=function(){q('/trk')};$('au').onclick=function(){q('/set?auto=1')};
+$('stop').onclick=function(){if(AU)wzAuto();X=Y=0;q('/stop')};$('trk').onclick=function(){q('/trk')};$('au').onclick=function(){q('/set?auto=1')};
 $('mo').onclick=function(){if(S.on)ask('Switch the motors off?','The camera is no longer held and may sag forward. Hold it if it is front-heavy.','Switch off',function(){q('/en?on=0')});else q('/en?on=1')};
 $('max').onchange=function(){q('/set?max='+this.value)};$('jsc').onchange=function(){q('/set?jsc='+this.value)};$('ramp').onchange=function(){q('/set?ramp='+this.value)};
-setInterval(function(){if(busy)return;var mvg=act||X||Y;if(mvg||last){busy=true;last=mvg?1:0;fetch('/j?x='+X.toFixed(3)+'&y='+Y.toFixed(3)).then(function(r){return r.json()}).then(show).catch(function(){}).then(function(){busy=false})}
-else if(++idle>=(W?3:10)){idle=0;busy=true;q('/s').then(function(){busy=false})}},100);
+setInterval(function(){if(busy||hold)return;var mvg=act||X||Y;if(mvg||last){busy=true;last=mvg?1:0;var c=new AbortController(),t=setTimeout(function(){c.abort()},1200);fetch('/j?x='+X.toFixed(3)+'&y='+Y.toFixed(3),{signal:c.signal}).then(function(r){return r.json()}).then(show).catch(function(){}).then(function(){clearTimeout(t);busy=false})}
+else if(++idle>=(W?3:10)){idle=0;q('/s')}},100);
 </script></body></html>)HTML";
 
 const char TUNE[] PROGMEM = R"HTML(<!doctype html><html><head><meta charset="utf-8">
