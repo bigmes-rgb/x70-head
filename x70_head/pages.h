@@ -352,7 +352,7 @@ $('evd').ontoggle=function(){if(this.open)evLoad()};
 $('stop').onclick=function(){if(AU)wzAuto();X=Y=0;q('/stop')};$('trk').onclick=function(){q('/trk')};$('au').onclick=function(){q('/set?auto=1')};
 $('mo').onclick=function(){if(S.on)ask('Switch the motors off?','The camera is no longer held and may sag forward. Hold it if it is front-heavy.','Switch off',function(){q('/en?on=0')});else q('/en?on=1')};
 $('max').onchange=function(){q('/set?max='+this.value)};$('jsc').onchange=function(){q('/set?jsc='+this.value)};$('ramp').onchange=function(){q('/set?ramp='+this.value)};
-setInterval(function(){if(busy||hold)return;var mvg=act||X||Y;if(mvg||last){busy=true;last=mvg?1:0;var c=new AbortController(),t=setTimeout(function(){c.abort()},1200);fetch('/j?x='+X.toFixed(3)+'&y='+Y.toFixed(3),{signal:c.signal}).then(function(r){return r.json()}).then(show).catch(function(){}).then(function(){clearTimeout(t);busy=false})}
+setInterval(function(){if(busy||hold)return;var mvg=act||X||Y;if(mvg||last){busy=true;last=mvg?1:0;var c=new AbortController(),t=setTimeout(function(){c.abort()},2500);fetch('/j?x='+X.toFixed(3)+'&y='+Y.toFixed(3),{signal:c.signal}).then(function(r){return r.json()}).then(show).catch(function(){}).then(function(){clearTimeout(t);busy=false})}
 else if(++idle>=(W?3:10)){idle=0;q('/s')}},100);
 </script></body></html>)HTML";
 

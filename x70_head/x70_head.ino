@@ -111,6 +111,12 @@ uint32_t viscaLastMs = 0;  // last pan/tilt command from OBS
 const float SONY_PAN[25]  = {0, 0.875f, 1.55f, 2.075f, 2.4f, 2.6f, 2.8f, 3.0f, 3.2f, 3.45f, 3.875f, 4.7f, 6.375f, 9.75f, 14.5f, 19.5f, 25.25f, 31.75f, 38.25f, 46.5f, 59.0f, 74.0f, 89.0f, 104.5f, 120.0f};
 const float SONY_TILT[19] = {0, 0.875f, 1.55f, 2.075f, 3.225f, 4.75f, 6.175f, 8.0f, 10.0f, 12.25f, 15.0f, 18.5f, 23.5f, 30.5f, 39.0f, 48.5f, 58.75f, 69.25f, 80.0f};
 uint32_t lastWebMs = 0, manualUntil = 0, lastMoveMs = 0;
+// The two sticks, kept apart: [0] = the page, [1] = the joystick box; pan and tilt speed wanted by each, and when it
+// last spoke. Kept apart so that one stick at rest cannot cancel the other (a box stick resting a hair off-centre
+// sends "zero" many times a second).
+float stickCmd[2][2] = {{0, 0}, {0, 0}}; uint32_t stickMs[2] = {0, 0};
+bool stickFromBox = false;               // who is moving the head by stick right now
+void stickClear() { stickCmd[0][0] = stickCmd[0][1] = stickCmd[1][0] = stickCmd[1][1] = 0; }
 const int NPRESET = 6;
 bool presetSet[NPRESET]; long presetPos[NPRESET][2];
 char presetName[NPRESET][28];   // shown on the page, e.g. "Pulpit"
@@ -240,13 +246,13 @@ void driverWatch() {
   else if (!driversDown) { driversDown = true; setMotors(false); }
 }
 void setMotors(bool on) {
-  if (!on) for (Axis *x : AX) { if (x->st) x->st->forceStop(); x->v = x->a = 0; x->going = false; x->webCmd = x->viscaCmd = 0; }
+  if (!on) { stickClear(); for (Axis *x : AX) { if (x->st) x->st->forceStop(); x->v = x->a = 0; x->going = false; x->webCmd = x->viscaCmd = 0; } }
   digitalWrite(EN_PIN, on ? LOW : HIGH);
   motorsOn = on;
 }
 
 // ---------------- motion ----------------
-void stopAll() { for (Axis *x : AX) { x->webCmd = x->viscaCmd = 0; if (x->going) { x->going = false; if (x->st) x->st->stopMove(); } } }
+void stopAll() { stickClear(); for (Axis *x : AX) { x->webCmd = x->viscaCmd = 0; if (x->going) { x->going = false; if (x->st) x->st->stopMove(); } } }
 
 long clampToLimits(const Axis &x, long p) {
   if (x.hasLo && p < x.lo) p = x.lo;
@@ -262,6 +268,7 @@ void gotoPos(long p, long t) {
     if (!x.st) continue;
     float sp = fminf(capSps(x), 90.0f / 60.0f * STEPS_PER_TURN);          // presets travel at up to 90 RPM
     x.webCmd = x.viscaCmd = 0; x.v = x.a = 0;
+    stickClear();
     x.st->setSpeedInHz((uint32_t)sp);
     x.st->setAcceleration((int32_t)(sp / fmaxf(ramp, 0.3f)));
     x.st->setLinearAcceleration((uint32_t)(sp * 0.15f));                   // soft start and soft landing
@@ -274,13 +281,19 @@ void gotoPos(long p, long t) {
 // Runs 100 times a second. Eases each axis toward the speed that was asked for and never passes a limit.
 void motionTick(float dt) {
   uint32_t now = millis();
-  bool webAlive = now - lastWebMs < DEADMAN_MS;
+  // Which stick drives: the page when it is being pushed, otherwise the joystick box. A stick that has gone quiet
+  // (page closed, box out of range) counts as let go.
+  {
+    bool alive[2] = {stickMs[0] != 0 && now - stickMs[0] < DEADMAN_MS, stickMs[1] != 0 && now - stickMs[1] < DEADMAN_MS};
+    int who = (alive[0] && (stickCmd[0][0] != 0 || stickCmd[0][1] != 0)) ? 0 : (alive[1] ? 1 : -1);
+    pan.webCmd = who < 0 ? 0 : stickCmd[who][0]; tilt.webCmd = who < 0 ? 0 : stickCmd[who][1];
+    if (pan.webCmd != 0 || tilt.webCmd != 0) stickFromBox = who == 1;
+  }
   bool manual = (int32_t)(manualUntil - now) > 0;
   if ((pan.viscaCmd != 0 || tilt.viscaCmd != 0) && now - viscaLastMs > VISCA_DEADMAN_MS) pan.viscaCmd = tilt.viscaCmd = 0;
   for (Axis *xp : AX) {
     Axis &x = *xp;
     if (!x.st) continue;
-    if (!webAlive) x.webCmd = 0;
     float want = (manual || !trackingOn) ? x.webCmd : (x.webCmd != 0 ? x.webCmd : x.viscaCmd);
     if (!motorsOn) want = 0;
     if (want != 0) x.trk = (x.webCmd == 0);                              // who started this move: tracking or the joystick
@@ -499,12 +512,11 @@ void tellJoystick(const char *msg) {          // straight to the box if its addr
 }
 
 // ---------------- joystick input (page and joystick box) ----------------
-bool stickFromBox = false;               // who moved the stick last: the joystick box or the page
-void joyInput(float x, float y) {                       // x, y from -1 to 1
+void joyInput(float x, float y, int who) {              // x, y from -1 to 1; who: 0 = the page, 1 = the joystick box
   auto curve = [](float u) { float m = fabsf(u); if (m < 0.06f) return 0.0f; m = (m - 0.06f) / 0.94f; return (u < 0 ? -1.0f : 1.0f) * m * m; };   // even build-up: fine near the middle without a sudden surge at the end of the stick's travel
-  pan.webCmd = curve(constrain(x, -1.0f, 1.0f)) * maxSps() * joyScale; tilt.webCmd = curve(constrain(y, -1.0f, 1.0f)) * maxSps() * joyScale;
-  lastWebMs = millis();
-  if (pan.webCmd != 0 || tilt.webCmd != 0) { manualUntil = lastWebMs + MANUAL_HOLD_MS; lastInputMs = lastWebMs; }
+  stickCmd[who][0] = curve(constrain(x, -1.0f, 1.0f)) * maxSps() * joyScale; stickCmd[who][1] = curve(constrain(y, -1.0f, 1.0f)) * maxSps() * joyScale;
+  stickMs[who] = lastWebMs = millis();
+  if (stickCmd[who][0] != 0 || stickCmd[who][1] != 0) { manualUntil = lastWebMs + MANUAL_HOLD_MS; lastInputMs = lastWebMs; }
 }
 void recallPreset(int n) {
   ev("preset %d asked for", n + 1);
@@ -521,7 +533,7 @@ void joyBoxPoll() {
     float x, y; long id; int k;
     if (joyUdp.remoteIP() != joyIP) ev("joystick box talking from %s", joyUdp.remoteIP().toString().c_str());
     joyIP = joyUdp.remoteIP();
-    if (sscanf(b, "J,%f,%f", &x, &y) == 2) { stickFromBox = true; joyInput(x, y); joySeenMs = millis(); }
+    if (sscanf(b, "J,%f,%f", &x, &y) == 2) { joyInput(x, y, 1); joySeenMs = millis(); }
     else if (sscanf(b, "H,%d", &k) == 1) {                                           // joystick box heartbeat: build number, tracking switch
       joyBuild = k; joySeenMs = millis();
       int sw = -1; static int lastSw = -1;
@@ -569,7 +581,7 @@ void webSetup() {
   web.on("/s", sendStatus);
   web.on("/tune", []() { web.sendHeader("Cache-Control", "no-store"); web.send_P(200, "text/html", TUNE); });
   web.on("/j", []() {                                   // joystick: x, y from -1 to 1
-    stickFromBox = false; joyInput(web.arg("x").toFloat(), web.arg("y").toFloat());
+    joyInput(web.arg("x").toFloat(), web.arg("y").toFloat(), 0);
     sendStatus();
   });
   web.on("/stop", []() { ev("STOP pressed on the page"); stopAll(); manualUntil = millis() + MANUAL_HOLD_MS; sendStatus(); });
