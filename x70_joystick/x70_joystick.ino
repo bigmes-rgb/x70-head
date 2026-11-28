@@ -266,14 +266,14 @@ void loop() {
   if (wifiRestartAt != 0 && (int32_t)(now - wifiRestartAt) >= 0) ESP.restart();
   if (updateRequested && wifi) { updateRequested = false; selfUpdate(); }
 
-  if (now - lastSend >= 50) {                                     // 20 times a second
+  if (now - lastSend >= 25) {                                     // 40 times a second, for a quick response
     lastSend = now;
     float a = readAxis(A), b = readAxis(B);
     float x = swapAxes ? a : b, y = swapAxes ? b : a;           // side sensor = left/right, top sensor = up/down
     if (flipLR) x = -x;
     if (flipUD) y = -y;
     bool moving = fabsf(x) > 0.05f || fabsf(y) > 0.05f;
-    if (wasMoving && !moving) zerosLeft = 5;                      // tell the head clearly that the stick was let go
+    if (wasMoving && !moving) zerosLeft = 10;                      // tell the head clearly that the stick was let go
     if (wifi && (moving || zerosLeft > 0)) {
       char m[32]; snprintf(m, sizeof m, "J,%.3f,%.3f", moving ? x : 0.0f, moving ? y : 0.0f);
       sendToHead(m);

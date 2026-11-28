@@ -459,7 +459,7 @@ void tellJoystick(const char *msg) {          // straight to the box if its addr
 
 // ---------------- joystick input (page and joystick box) ----------------
 void joyInput(float x, float y) {                       // x, y from -1 to 1
-  auto curve = [](float u) { float m = fabsf(u); if (m < 0.06f) return 0.0f; m = (m - 0.06f) / 0.94f; return (u < 0 ? -1.0f : 1.0f) * powf(m, 3.0f); };   // very fine control near the middle, full speed only at the end
+  auto curve = [](float u) { float m = fabsf(u); if (m < 0.06f) return 0.0f; m = (m - 0.06f) / 0.94f; return (u < 0 ? -1.0f : 1.0f) * m * m; };   // even build-up: fine near the middle without a sudden surge at the end of the stick's travel
   pan.webCmd = curve(constrain(x, -1.0f, 1.0f)) * maxSps() * joyScale; tilt.webCmd = curve(constrain(y, -1.0f, 1.0f)) * maxSps() * joyScale;
   lastWebMs = millis();
   if (pan.webCmd != 0 || tilt.webCmd != 0) { manualUntil = lastWebMs + MANUAL_HOLD_MS; lastInputMs = lastWebMs; }
