@@ -397,17 +397,19 @@ void updateTask(void *) {
   httpUpdate.rebootOnUpdate(false);
   httpUpdate.onProgress([](int cur, int total) { updStage = 2; updPct = total > 0 ? (int)(100LL * cur / total) : 0; });
   String err;
-  for (int attempt = 1; attempt <= 3; attempt++) {
+  for (int attempt = 1; attempt <= 5; attempt++) {
     updTry = attempt; updStage = 1; updPct = 0;
     WiFiClientSecure c; c.setInsecure();
     t_httpUpdate_return r = httpUpdate.update(c, String(FW_BASE) + FW_FILE);
     if (r == HTTP_UPDATE_OK) { updPct = 100; updStage = 3; delay(2500); ESP.restart(); }
-    err = httpUpdate.getLastErrorString();
+    char tls[80] = ""; int te = c.lastError(tls, sizeof tls);       // the exact reason the secure connection gave, for diagnosis
+    err = httpUpdate.getLastErrorString(); if (te) { err += " / "; err += tls; }
+    err.replace("\"", "'");
     Serial.printf("Update try %d failed: %s\n", attempt, err.c_str());
-    delay(2000);
+    delay(4000);
   }
   updStage = 4;
-  prefs.putString("updmsg", "Update failed after 3 tries: " + err + " (free memory " + String(ESP.getFreeHeap() / 1024) + " KB)");
+  prefs.putString("updmsg", "Update failed after 5 tries: " + err + " (free memory " + String(ESP.getFreeHeap() / 1024) + " KB)");
   delay(4000);
   ESP.restart();                                 // back to normal running on the build it already has
 }
@@ -536,17 +538,17 @@ var U=null;try{U=JSON.parse(sessionStorage.x70up||'null')}catch(e){}if(U&&Date.n
 function upGo(){if(S.lat>0&&S.fw>=S.lat&&(!S.jon||S.jfw>=S.lat)&&!confirm('Both are already on the newest build. Install it again?'))return;
 U={from:S.fw||0,target:S.lat||0,jon:!!S.jon,t0:Date.now(),step:1,end:''};upDraw(S);q('/fwgo')}
 function upDraw(s){var n=Date.now();
-if(s&&!U.end){if(s.ust==1)U.step=Math.max(U.step,2);else if(s.ust==2){U.step=3;U.pct=s.upc}else if(s.ust==3)U.step=4;else if(s.ust==4){U.end='bad';U.msg='The download failed 3 times. The head is going back to the build it had.'}
+if(s&&!U.end){if(s.ust==1)U.step=Math.max(U.step,2);else if(s.ust==2){U.step=3;U.pct=s.upc}else if(s.ust==3)U.step=4;else if(s.ust==4){U.end='bad';U.msg='The download failed 5 times. The head is going back to the build it had.'}
 else if(s.fw>U.from||(U.step>=2&&U.target&&s.fw>=U.target)){U.step=5;U.end='ok';U.fw=s.fw}
 else if(U.step>=2||n-U.t0>30000){U.end='bad';U.msg=s.msg||'The head came back on the same build.'}}
 if(!s&&!U.end&&U.step==3&&U.pct>=95)U.step=4;if(s&&U.end=='bad'&&s.ust==0&&s.msg)U.msg=s.msg;
 for(var i=1;i<=5;i++)$('u'+i).className='us '+(U.end=='ok'||i<U.step?'ok':i==U.step?(U.end=='bad'?'bad':'now'):'');
-$('upc').textContent=U.step==3?(U.pct||0)+' %':'';$('ub').style.width=(U.step>3||U.end=='ok'?100:U.step==3?(U.pct||0):0)+'%';
+$('upc').textContent=U.step==3?(U.pct||0)+' %':'';if(s&&s.ust==1&&s.utry>1)$('um').dataset.t='Try '+s.utry+' of 5. ';else if(s)$('um').dataset.t='';$('ub').style.width=(U.step>3||U.end=='ok'?100:U.step==3?(U.pct||0):0)+'%';
 if(U.end=='ok')$('u5t').textContent='Head running build '+U.fw;
-var j='';if(s){if(!U.jon&&!s.jon){j='';$('uj').textContent='Joystick box: not switched on'}else if(s.jon&&(U.target||U.fw)&&s.jfw>=(U.target||U.fw)){j='ok';$('uj').textContent='Joystick box running build '+s.jfw}else{j=U.end=='ok'&&n-U.t0>240000?'bad':'now';$('uj').textContent=s.jon?'Joystick box: on build '+s.jfw+', updating':'Joystick box: restarting'}$('u6').className='us '+j}
+var j='';if(s){if(!U.jon&&!s.jon){j='';$('uj').textContent='Joystick box: not switched on'}else if(s.jon&&(U.target||U.fw)&&s.jfw>=(U.target||U.fw)){j='ok';$('uj').textContent='Joystick box running build '+s.jfw}else if(U.end!='ok'){j='';$('uj').textContent='Joystick box: next, after the head'}else{j=n-U.t0>360000?'bad':'now';$('uj').textContent=s.jon?'Joystick box: on build '+s.jfw+', updating now':'Joystick box: restarting'}$('u6').className='us '+j}
 $('ut').textContent=U.end=='ok'?'Update finished':U.end=='bad'?'Update did not finish':'Updating the head';
-$('um').textContent=U.end=='ok'?'':U.end=='bad'?U.msg:!s?'The head is restarting. This page reconnects by itself.':n-U.t0>180000?'This is taking longer than normal. Leave everything powered.':'About a minute in total. Keep this page open; nothing else is needed.';
-$('ux').hidden=!U.end;$('up').hidden=false;try{sessionStorage.x70up=JSON.stringify(U)}catch(e){}}
+$('um').textContent=U.end=='ok'?'':U.end=='bad'?U.msg:!s?'The head is restarting. This page reconnects by itself.':n-U.t0>180000?'This is taking longer than normal. Leave everything powered.':($('um').dataset.t||'')+'About a minute for the head, then the joystick box. Nothing else is needed.';
+$('ux').hidden=!U.end;if(U.end=='ok'&&$('u6').className=='us now'){$('ut').textContent='Head done, joystick box next';$('um').textContent='The joystick box updates by itself now. You can close this.'}$('up').hidden=false;try{sessionStorage.x70up=JSON.stringify(U)}catch(e){}}
 $('ux').onclick=function(){U=null;$('up').hidden=true;try{sessionStorage.removeItem('x70up')}catch(e){}};
 function lim(a,e){q('/lim?a='+a+'&e='+e)}
 for(var i=0;i<6;i++){var b=document.createElement('button');b.id='p'+i;b.textContent=i+1;b.onclick=(function(n){return function(){q('/p?n='+n+(saving?'&save=1':''));saving=false;$('sv').className=''}})(i);$('pr').appendChild(b)}
@@ -889,13 +891,13 @@ void loop() {
     if (autoUpdate && FW_BUILD > 0 && latestBuild > FW_BUILD) { Serial.printf("New build %d found: updating\n", latestBuild); updateRequested = true; }
   }
   // joystick box still on an older build (it was off during the last update): tell it again, at most every 5 minutes
-  if (online && quiet && autoUpdate && latestBuild > 0 && joyBuild > 0 && joyBuild < latestBuild && now - joySeenMs < 6000 &&
-      (lastJoyNudge == 0 || now - lastJoyNudge > 300000UL)) { lastJoyNudge = now; tellJoystick("U"); }
+  bool still = !headMoving() && pan.viscaCmd == 0 && tilt.viscaCmd == 0 && pan.webCmd == 0 && tilt.webCmd == 0;
+  if (online && still && joyBuild > 0 && now - joySeenMs < 6000 &&
+      (joyBuild < FW_BUILD || (quiet && autoUpdate && joyBuild < latestBuild)) &&            // the two always run the same build
+      (lastJoyNudge == 0 || now - lastJoyNudge > 300000UL)) { lastJoyNudge = now; for (int i = 0; i < 3; i++) { tellJoystick("U"); delay(30); } }
   if (updateRequested && !headMoving()) {
     updateRequested = false;
-    for (int i = 0; i < 3; i++) { tellJoystick("U"); delay(30); }   // tell the joystick box to update itself too
-    delay(300);
-    requestUpdateRestart();
+    requestUpdateRestart();                    // the head goes first; the joystick box is told once the head is back (below)
   }
   if (WiFi.getMode() == WIFI_STA && WiFi.status() != WL_CONNECTED) {      // Wi-Fi dropped: stop moving, it rejoins on its own
     static uint32_t lastTry = 0;
